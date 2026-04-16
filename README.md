@@ -1,47 +1,58 @@
 # evilwm
 
+> [!WARNING]
+> `evilwm` is an unfinished research/prototype project. This GitHub mirror exists mainly as a public portfolio snapshot of the idea and direction. If you are not actively developing on it, you should treat it as preview material rather than something ready for installation, everyday use, or polished build/run guidance.
+
 `evilwm` is an experimental Wayland compositor built around a shared infinite canvas: windows live in world coordinates, and outputs behave like cameras looking into that same world.
 
-## Status
+## The idea
 
-`evilwm` is currently a prototype. It is not yet a finished daily-driver compositor.
+Most desktop environments make monitors or workspaces the primary containers that windows live inside. `evilwm` goes in a different direction:
+
+- windows exist in one shared 2D world
+- outputs are viewports into that world
+- navigation can feel more like panning around a map or canvas than switching between isolated workspaces
+- window-manager behavior should be scriptable instead of hardcoded
+
+The long-term goal is a compositor where:
+
+- **Rust provides facts**
+- **Lua provides policy**
+
+In practice, that means Rust should own runtime truth, rendering, protocol handling, validation, and safety, while Lua should be able to shape focus rules, movement behavior, placement, layouts, grouping, and compositor-side visuals.
+
+The point is not just “a compositor with a config file.” The point is a small compositor kernel that can support very different window-management styles without needing a fork for every personality.
+
+## Why it exists
+
+`evilwm` is an attempt to explore a desktop model that is:
+
+- more spatial than workspace-driven
+- more composable than monolithic window managers
+- more scriptable in policy without giving up a strict runtime core
+
+If it succeeds, the same core could support a freeform floating workflow, a Lua-authored tiler, a spatial canvas desktop, or hybrids that borrow from all three.
+
+## Current status
+
+Today, the project is best read as:
+
+1. a compositor architecture experiment
+2. a growing policy/runtime testbed
+3. an early prototype, not a finished user product
+
+Active development is ongoing, and the real source of truth lives on Forgejo.
 
 ## Canonical repository
 
 **This GitHub repository is a curated release mirror.**
 
-For active development, full history, issues, examples, tests, and detailed documentation, use the canonical repository:
-
-**https://git.evileko.dev/evileko/evilwm**
-
-## Build
-
-```bash
-cargo build
-```
-
-## Run
-
-This public mirror is intentionally trimmed down, so the simplest way to try it is without a config:
-
-Nested prototype:
-
-```bash
-cargo run -- --backend winit --no-config
-```
-
-Headless mode:
-
-```bash
-cargo run -- --backend headless --no-config
-```
-
-For the full development tree, example configs, experimental tty workflow, and current project details, see:
+For active development, full history, issues, examples, tests, detailed documentation, and the actual development workflow, use the canonical repository:
 
 **https://git.evileko.dev/evileko/evilwm**
 
 ## Development / contributing
 
-Please use the canonical repository for development, issues, and documentation:
+If you want to follow development or work on the project, start here:
 
 **https://git.evileko.dev/evileko/evilwm**
