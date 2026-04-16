@@ -1,0 +1,7 @@
+target/
+.direnv/
+.env
+*.log
+.pi/
+CLAUDE.md
+review.md

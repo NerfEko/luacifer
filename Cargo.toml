@@ -1,0 +1,36 @@
+[package]
+name = "evilwm"
+version = "0.1.0"
+edition = "2024"
+description = "Experimental Wayland compositor with an infinite shared canvas model"
+license = "GPL-3.0-only"
+
+[lib]
+name = "evilwm"
+path = "src/lib.rs"
+
+[[bin]]
+name = "evilwm"
+path = "src/main.rs"
+
+[features]
+default = ["winit", "lua"]
+x11 = ["smithay/backend_x11"]
+winit = ["smithay/backend_winit", "smithay/desktop", "smithay/wayland_frontend"]
+udev = ["smithay/backend_drm", "smithay/backend_gbm", "smithay/backend_libinput", "smithay/backend_udev", "smithay/backend_session_libseat"]
+lua = ["dep:mlua"]
+headless-test = []
+
+[dependencies]
+clap = { version = "4.5.38", features = ["derive"] }
+mlua = { version = "0.11.6", optional = true, features = ["luau"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+smithay = { version = "0.7.0", default-features = false, features = ["backend_winit", "desktop", "wayland_frontend"] }
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+
+[dev-dependencies]
+approx = "0.5.1"
+tempfile = "3.23.0"
+wayland-client = "0.31.14"
+wayland-protocols = { version = "0.32.9", features = ["client"] }
