@@ -106,53 +106,116 @@ That means the same compositor kernel could eventually support very different pe
 <details>
 <summary><strong>Spatial floating canvas setup</strong></summary>
 
-A config can lean into the shared-world idea:
+This is the direction the current public example config leans toward: windows cascade into view, movement stays freeform, and the canvas itself is part of the workflow.
 
-- new windows cascade around the current area of the canvas
-- movement stays freeform
-- panning and zooming are primary navigation tools
-- overlays can emphasize focus, position, or spatial grouping
+```lua
+evil.bind("Super+H", "pan_left", { amount = 48 })
+evil.bind("Super+L", "pan_right", { amount = 48 })
+evil.bind("Super+Equal", "zoom_in", { amount = 1.15 })
 
-This is the direction the current public example config leans toward.
+evil.on.place_window = function(ctx)
+  return {
+    kind = "set_bounds",
+    id = ctx.window.id,
+    x = ctx.window.x + 48,
+    y = ctx.window.y + 48,
+    w = 960,
+    h = 720,
+  }
+end
+
+evil.on.move_update = function(ctx)
+  return {
+    kind = "move_window",
+    id = ctx.window.id,
+    x = ctx.window.x + ctx.dx,
+    y = ctx.window.y + ctx.dy,
+  }
+end
+```
 </details>
 
 <details>
 <summary><strong>Classic tiler personality</strong></summary>
 
-A different config could make the same compositor feel much more like a tiling WM:
+A different config could use the same compositor as a much more layout-driven WM by making placement deterministic and treating map events like relayout opportunities.
 
-- window placement chooses deterministic layout slots
-- map/unmap hooks trigger relayout behavior
-- movement hooks can snap or reinsert windows into layout structures
-- Lua-owned metadata could drive tags, stacks, or workspace-like groupings
+```lua
+local next_column = 0
 
-The important part is that this should be policy, not a separate fork.
+evil.on.place_window = function(ctx)
+  local x = next_column * 640
+  next_column = (next_column + 1) % 2
+  return {
+    kind = "set_bounds",
+    id = ctx.window.id,
+    x = x,
+    y = 0,
+    w = 640,
+    h = 720,
+  }
+end
+
+evil.on.window_mapped = function(ctx)
+  return { kind = "focus_window", id = ctx.window.id }
+end
+```
 </details>
 
 <details>
 <summary><strong>Automation-heavy personal desktop</strong></summary>
 
-Another config could focus on automation and custom rules:
+Lua can also encode personal workflow rules directly in config logic.
 
-- certain apps always open with specific sizes or positions
-- focus behavior can be tuned per workflow
-- overlays can present status or context visually
-- scripts can encode personal habits without changing the compositor core
+```lua
+evil.on.place_window = function(ctx)
+  if ctx.window.app_id == "foot" then
+    return { kind = "set_bounds", id = ctx.window.id, x = 80, y = 80, w = 900, h = 620 }
+  end
 
-That is where the Rust-facts / Lua-policy split becomes especially powerful.
+  if ctx.window.title and string.find(string.lower(ctx.window.title), "music", 1, true) then
+    return { kind = "set_bounds", id = ctx.window.id, x = 1200, y = 120, w = 520, h = 520 }
+  end
+end
+
+evil.on.focus_changed = function(ctx)
+  if ctx.focused_window then
+    print("focused:", ctx.focused_window.title or ctx.focused_window.app_id or ctx.focused_window.id)
+  end
+end
+```
 </details>
 
 <details>
 <summary><strong>Hybrid setups</strong></summary>
 
-The most interesting end state may be hybrids:
+A hybrid config can mix floating, layout-style placement, and policy exceptions without splitting into separate compositor forks.
 
-- floating in some situations
-- layout-driven in others
-- canvas navigation for broad movement
-- rule-driven grouping for focused work
+```lua
+evil.on.place_window = function(ctx)
+  if ctx.window.app_id == "pavucontrol" then
+    return { kind = "set_bounds", id = ctx.window.id, x = 1200, y = 160, w = 420, h = 520 }
+  end
 
-That mix-and-match ability is the main reason to pursue this architecture in the first place.
+  return { kind = "set_bounds", id = ctx.window.id, x = 160, y = 120, w = 1000, h = 720 }
+end
+
+evil.on.draw_overlay = function(ctx)
+  if not ctx.focused_window then
+    return nil
+  end
+
+  return evil.draw.stroke_rect({
+    space = "world",
+    x = ctx.focused_window.x,
+    y = ctx.focused_window.y,
+    w = ctx.focused_window.w,
+    h = ctx.focused_window.h,
+    width = 3,
+    color = { 0.74, 0.58, 0.98, 0.98 },
+  })
+end
+```
 </details>
 
 ## Active development
