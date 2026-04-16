@@ -43,11 +43,59 @@ Today, the project is best read as:
 
 Active development is ongoing, and the real source of truth lives on Forgejo.
 
+## What the Lua layer is for
+
+The Lua side is where `evilwm` is supposed to become expressive.
+
+Rather than hardcoding all window-manager behavior in Rust, the project exposes runtime facts to Lua and lets Lua decide policy. That includes things like:
+
+- keybindings
+- focus behavior
+- movement and resize rules
+- placement logic
+- compositor-drawn overlays and visuals
+
+A typical config today combines a small amount of setup with hook-based policy:
+
+```lua
+evil.config({
+  canvas = {
+    min_zoom = 0.2,
+    max_zoom = 4.0,
+    zoom_step = 1.15,
+    pan_step = 64,
+  },
+})
+
+evil.bind("Super+H", "pan_left", { amount = 32 })
+
+evil.on.move_update = function(ctx)
+  return {
+    kind = "move_window",
+    id = ctx.window.id,
+    x = ctx.window.x + ctx.dx,
+    y = ctx.window.y + ctx.dy,
+  }
+end
+```
+
+The important part is the shape of the system:
+
+- Rust provides authoritative state and validated primitive actions
+- Lua reads runtime facts through hook context (`ctx`)
+- Lua returns or triggers policy actions like moving, focusing, resizing, and drawing
+
+This mirror includes one small self-contained example config:
+
+- [`example-config.lua`](./example-config.lua)
+
+It is included to show the current direction of the Lua API, not to imply long-term stability yet.
+
 ## Canonical repository
 
 **This GitHub repository is a curated release mirror.**
 
-For active development, full history, issues, examples, tests, detailed documentation, and the actual development workflow, use the canonical repository:
+For active development, full history, issues, more example configs, tests, detailed documentation, and the actual development workflow, use the canonical repository:
 
 **https://git.evileko.dev/evileko/evilwm**
 
