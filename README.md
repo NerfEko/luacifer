@@ -3,7 +3,7 @@
 > [!WARNING]
 > `evilwm` is an unfinished research/prototype project. This GitHub mirror exists mainly as a public portfolio snapshot of the idea and direction. If you are not actively developing on it, you should treat it as preview material rather than something ready for installation, everyday use, or polished build/run guidance.
 >
-> **Canonical repository:** https://git.evileko.dev/evileko/evilwm
+> **Active development repo:** https://git.evileko.dev/evileko/evilwm
 
 `evilwm` is an experimental Wayland compositor built around a shared infinite canvas: windows live in world coordinates, and outputs behave like cameras looking into that same world.
 
@@ -155,11 +155,11 @@ The most interesting end state may be hybrids:
 That mix-and-match ability is the main reason to pursue this architecture in the first place.
 </details>
 
-## Canonical repository
+## Active development
 
 **This GitHub repository is a curated release mirror.**
 
-For active development, full history, issues, more example configs, tests, detailed documentation, and the actual development workflow, use the canonical repository:
+For active development, full history, issues, more example configs, tests, detailed documentation, and the real development workflow, use the main development repo:
 
 **https://git.evileko.dev/evileko/evilwm**
 
