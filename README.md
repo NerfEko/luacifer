@@ -55,7 +55,7 @@ Rather than hardcoding all window-manager behavior in Rust, the project exposes 
 - placement logic
 - compositor-drawn overlays and visuals
 
-A typical config today combines a small amount of setup with hook-based policy:
+A typical config today combines setup, hook-based policy, and drawing:
 
 ```lua
 evil.config({
@@ -67,7 +67,11 @@ evil.config({
   },
 })
 
-evil.bind("Super+H", "pan_left", { amount = 32 })
+evil.bind("Super+Return", "spawn", { command = terminal_cmd })
+
+evil.on.place_window = function(ctx)
+  return { kind = "set_bounds", id = ctx.window.id, x = 200, y = 160, w = 960, h = 720 }
+end
 
 evil.on.move_update = function(ctx)
   return {
@@ -83,13 +87,71 @@ The important part is the shape of the system:
 
 - Rust provides authoritative state and validated primitive actions
 - Lua reads runtime facts through hook context (`ctx`)
-- Lua returns or triggers policy actions like moving, focusing, resizing, and drawing
+- Lua returns or triggers policy actions like moving, focusing, resizing, placing, spawning, and drawing
 
-This mirror includes one small self-contained example config:
+This mirror includes one fuller self-contained example config:
 
 - [`example-config.lua`](./example-config.lua)
 
-It is included to show the current direction of the Lua API, not to imply long-term stability yet.
+It is meant to be a readable baseline with practical keybindings, spawn commands, placement, focus behavior, movement, resize handling, and compositor-drawn visuals.
+
+## Why this is the interesting part
+
+The real promise of this project is not just “Lua configuration.” It is that **a Lua config can completely change the kind of window manager this compositor feels like, without requiring a fork of the Rust core.**
+
+That means the same compositor kernel could eventually support very different personalities just by changing policy and helper modules.
+
+<details>
+<summary><strong>Spatial floating canvas setup</strong></summary>
+
+A config can lean into the shared-world idea:
+
+- new windows cascade around the current area of the canvas
+- movement stays freeform
+- panning and zooming are primary navigation tools
+- overlays can emphasize focus, position, or spatial grouping
+
+This is the direction the current public example config leans toward.
+</details>
+
+<details>
+<summary><strong>Classic tiler personality</strong></summary>
+
+A different config could make the same compositor feel much more like a tiling WM:
+
+- window placement chooses deterministic layout slots
+- map/unmap hooks trigger relayout behavior
+- movement hooks can snap or reinsert windows into layout structures
+- Lua-owned metadata could drive tags, stacks, or workspace-like groupings
+
+The important part is that this should be policy, not a separate fork.
+</details>
+
+<details>
+<summary><strong>Automation-heavy personal desktop</strong></summary>
+
+Another config could focus on automation and custom rules:
+
+- certain apps always open with specific sizes or positions
+- focus behavior can be tuned per workflow
+- overlays can present status or context visually
+- scripts can encode personal habits without changing the compositor core
+
+That is where the Rust-facts / Lua-policy split becomes especially powerful.
+</details>
+
+<details>
+<summary><strong>Hybrid setups</strong></summary>
+
+The most interesting end state may be hybrids:
+
+- floating in some situations
+- layout-driven in others
+- canvas navigation for broad movement
+- rule-driven grouping for focused work
+
+That mix-and-match ability is the main reason to pursue this architecture in the first place.
+</details>
 
 ## Canonical repository
 
