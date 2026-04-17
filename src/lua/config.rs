@@ -13,6 +13,8 @@ use crate::input::bindings::canonical_modifier_name;
 pub struct Config {
     pub backend: Option<String>,
     pub canvas: CanvasConfig,
+    pub draw: DrawConfig,
+    pub window: WindowConfig,
     pub autostart: Vec<String>,
     pub bindings: Vec<BindingConfig>,
     pub rules: Vec<RuleConfig>,
@@ -34,6 +36,48 @@ impl Default for CanvasConfig {
             max_zoom: 8.0,
             zoom_step: 1.2,
             pan_step: 64.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrawLayer {
+    Background,
+    Windows,
+    Overlay,
+    Cursor,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DrawConfig {
+    /// User-facing stacking order from bottom-most layer to top-most layer.
+    pub stack: Vec<DrawLayer>,
+}
+
+impl Default for DrawConfig {
+    fn default() -> Self {
+        Self {
+            stack: vec![
+                DrawLayer::Background,
+                DrawLayer::Windows,
+                DrawLayer::Overlay,
+                DrawLayer::Cursor,
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowConfig {
+    pub use_client_default_size: bool,
+    pub remember_sizes_by_app_id: bool,
+}
+
+impl Default for WindowConfig {
+    fn default() -> Self {
+        Self {
+            use_client_default_size: true,
+            remember_sizes_by_app_id: true,
         }
     }
 }
@@ -71,6 +115,8 @@ pub enum ConfigError {
 pub(crate) struct ConfigBuilder {
     backend: Option<String>,
     canvas: CanvasConfig,
+    draw: DrawConfig,
+    window: WindowConfig,
     autostart: Vec<String>,
     bindings: Vec<BindingConfig>,
     rules: Vec<RuleConfig>,
@@ -125,10 +171,22 @@ impl Config {
         } else {
             CanvasConfig::default()
         };
+        let draw = if let Some(draw_table) = table.get::<Option<Table>>("draw")? {
+            parse_draw_table(&draw_table, DrawConfig::default())?
+        } else {
+            DrawConfig::default()
+        };
+        let window = if let Some(window_table) = table.get::<Option<Table>>("window")? {
+            parse_window_table(&window_table, WindowConfig::default())?
+        } else {
+            WindowConfig::default()
+        };
 
         let config = Self {
             backend,
             canvas,
+            draw,
+            window,
             autostart,
             bindings,
             rules,
@@ -147,9 +205,19 @@ impl Config {
             )));
         }
 
+        if !self.canvas.min_zoom.is_finite() {
+            return Err(ConfigError::Validation(
+                "canvas.min_zoom must be a finite number".into(),
+            ));
+        }
         if self.canvas.min_zoom <= 0.0 {
             return Err(ConfigError::Validation(
                 "canvas.min_zoom must be > 0".into(),
+            ));
+        }
+        if !self.canvas.max_zoom.is_finite() {
+            return Err(ConfigError::Validation(
+                "canvas.max_zoom must be a finite number".into(),
             ));
         }
         if self.canvas.max_zoom < self.canvas.min_zoom {
@@ -157,9 +225,19 @@ impl Config {
                 "canvas.max_zoom must be >= canvas.min_zoom".into(),
             ));
         }
+        if !self.canvas.zoom_step.is_finite() {
+            return Err(ConfigError::Validation(
+                "canvas.zoom_step must be a finite number".into(),
+            ));
+        }
         if self.canvas.zoom_step <= 0.0 {
             return Err(ConfigError::Validation(
                 "canvas.zoom_step must be > 0".into(),
+            ));
+        }
+        if !self.canvas.pan_step.is_finite() {
+            return Err(ConfigError::Validation(
+                "canvas.pan_step must be a finite number".into(),
             ));
         }
         if self.canvas.pan_step < 0.0 {
@@ -167,6 +245,8 @@ impl Config {
                 "canvas.pan_step must be >= 0".into(),
             ));
         }
+
+        validate_draw_stack(&self.draw.stack)?;
 
         const SUPPORTED_ACTIONS: &[&str] = &[
             "pan_left",
@@ -265,6 +345,12 @@ impl ConfigBuilder {
         if let Some(canvas_table) = table.get::<Option<Table>>("canvas")? {
             self.canvas = parse_canvas_table(&canvas_table, self.canvas.clone())?;
         }
+        if let Some(draw_table) = table.get::<Option<Table>>("draw")? {
+            self.draw = parse_draw_table(&draw_table, self.draw.clone())?;
+        }
+        if let Some(window_table) = table.get::<Option<Table>>("window")? {
+            self.window = parse_window_table(&window_table, self.window.clone())?;
+        }
 
         self.autostart
             .extend(parse_string_list(table.get::<Option<Table>>("autostart")?)?);
@@ -321,6 +407,8 @@ impl ConfigBuilder {
         let config = Config {
             backend: self.backend.clone(),
             canvas: self.canvas.clone(),
+            draw: self.draw.clone(),
+            window: self.window.clone(),
             autostart: self.autostart.clone(),
             bindings: self.bindings.clone(),
             rules: self.rules.clone(),
@@ -372,6 +460,68 @@ fn parse_canvas_table(table: &Table, base: CanvasConfig) -> Result<CanvasConfig,
             .get::<Option<f64>>("pan_step")?
             .unwrap_or(base.pan_step),
     })
+}
+
+fn parse_draw_table(table: &Table, base: DrawConfig) -> Result<DrawConfig, ConfigError> {
+    let stack = match table.get::<Option<Table>>("stack")? {
+        Some(stack_table) => parse_draw_stack(&stack_table)?,
+        None => base.stack,
+    };
+    Ok(DrawConfig { stack })
+}
+
+fn parse_window_table(table: &Table, base: WindowConfig) -> Result<WindowConfig, ConfigError> {
+    Ok(WindowConfig {
+        use_client_default_size: table
+            .get::<Option<bool>>("use_client_default_size")?
+            .unwrap_or(base.use_client_default_size),
+        remember_sizes_by_app_id: table
+            .get::<Option<bool>>("remember_sizes_by_app_id")?
+            .unwrap_or(base.remember_sizes_by_app_id),
+    })
+}
+
+fn parse_draw_stack(table: &Table) -> Result<Vec<DrawLayer>, ConfigError> {
+    let mut stack = Vec::new();
+    for item in table.sequence_values::<String>() {
+        stack.push(parse_draw_layer_name(&item?)?);
+    }
+    Ok(stack)
+}
+
+fn parse_draw_layer_name(name: &str) -> Result<DrawLayer, ConfigError> {
+    match name {
+        "background" => Ok(DrawLayer::Background),
+        "windows" => Ok(DrawLayer::Windows),
+        "overlay" => Ok(DrawLayer::Overlay),
+        "cursor" => Ok(DrawLayer::Cursor),
+        _ => Err(ConfigError::Validation(format!(
+            "unsupported draw layer in draw.stack: {name}"
+        ))),
+    }
+}
+
+fn validate_draw_stack(stack: &[DrawLayer]) -> Result<(), ConfigError> {
+    use DrawLayer::{Background, Cursor, Overlay, Windows};
+
+    if stack.len() != 4 {
+        return Err(ConfigError::Validation(
+            "draw.stack must list exactly 4 layers: background, windows, overlay, cursor"
+                .into(),
+        ));
+    }
+
+    for required in [Background, Windows, Overlay, Cursor] {
+        let count = stack.iter().filter(|layer| **layer == required).count();
+        if count != 1 {
+            return Err(ConfigError::Validation(
+                "draw.stack must include each layer exactly once: background, windows, overlay, cursor"
+                    .into(),
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn parse_string_list(table: Option<Table>) -> Result<Vec<String>, ConfigError> {

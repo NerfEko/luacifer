@@ -12,14 +12,15 @@ use crate::{
     compositor::EvilWm,
     input::{ModifierSet, parse_keyspec},
     lua::{
-        ConfigError, DrawCommand, HookAction, OutputSnapshot, RuntimeStateSnapshot,
+        ConfigError, DrawCommand, HookAction, OutputSnapshot, PropertyValue, RuntimeStateSnapshot,
         WindowSnapshot, apply_hook_action, config::resolve_include_path, parse_draw_commands,
         register_draw_api,
         hook_support::{
-            ResolveFocusContext, delta_hook_context, draw_hook_context, find_window_snapshot,
+            ResolveFocusContext, delta_hook_context, draw_hook_context, find_output_snapshot,
+            find_output_snapshot_at_point, find_primary_output_snapshot, find_window_snapshot,
             focus_hook_context, focus_resolve_context, gesture_hook_context, key_hook_context,
-            output_to_table, rect_to_table, snapshot_to_table, window_hook_context,
-            window_to_table,
+            output_to_table, property_changed_hook_context, rect_to_table, snapshot_to_table,
+            window_hook_context, window_to_table,
         },
         parse_hook_actions,
     },
@@ -33,14 +34,15 @@ pub struct ResolveFocusRequest<'a> {
     pub pointer: Option<Point>,
     pub button: Option<u32>,
     pub pressed: Option<bool>,
+    pub modifiers: Option<ModifierSet>,
 }
 
 #[derive(Debug)]
 pub struct LiveLuaHooks {
     lua: Lua,
-    _base_dir: PathBuf,
     action_queue: Rc<RefCell<Vec<HookAction>>>,
     query_snapshot: Rc<RefCell<Option<RuntimeStateSnapshot>>>,
+    allow_setup_calls_during_load: Rc<RefCell<bool>>,
 }
 
 impl LiveLuaHooks {
@@ -50,15 +52,21 @@ impl LiveLuaHooks {
 
         let action_queue = Rc::new(RefCell::new(Vec::new()));
         let query_snapshot = Rc::new(RefCell::new(None));
+        let allow_setup_calls_during_load = Rc::new(RefCell::new(false));
 
         register_include(&lua, base_dir.clone())?;
-        register_live_api(&lua, &action_queue, &query_snapshot)?;
+        register_live_api(
+            &lua,
+            &action_queue,
+            &query_snapshot,
+            &allow_setup_calls_during_load,
+        )?;
 
         Ok(Self {
             lua,
-            _base_dir: base_dir,
             action_queue,
             query_snapshot,
+            allow_setup_calls_during_load,
         })
     }
 
@@ -73,12 +81,16 @@ impl LiveLuaHooks {
 
     pub fn load_script_str(&self, source: &str, name: impl AsRef<Path>) -> Result<(), ConfigError> {
         let name = name.as_ref();
-        self.lua
+        *self.allow_setup_calls_during_load.borrow_mut() = true;
+        let result = self
+            .lua
             .load(source)
             .set_name(name.to_string_lossy().as_ref())
             .eval::<Value>()
             .map(|_| ())
-            .map_err(ConfigError::from)
+            .map_err(ConfigError::from);
+        *self.allow_setup_calls_during_load.borrow_mut() = false;
+        result
     }
 
     pub fn has_hook(&self, hook_name: &str) -> Result<bool, ConfigError> {
@@ -158,6 +170,36 @@ impl LiveLuaHooks {
         )
     }
 
+    /// Trigger `evil.on.window_property_changed`.
+    ///
+    /// `state` is used to build the runtime snapshot. `ctx.window` reflects the **new** state.
+    pub fn trigger_window_property_changed(
+        &self,
+        state: &mut EvilWm,
+        id: WindowId,
+        property: &str,
+        old_value: &PropertyValue,
+        new_value: &PropertyValue,
+    ) -> Result<bool, ConfigError> {
+        let snapshot = state.state_snapshot();
+        let Some(window) = find_window_snapshot(&snapshot, id) else {
+            return Ok(false);
+        };
+        self.call_hook(
+            state,
+            &snapshot,
+            "window_property_changed",
+            property_changed_hook_context(
+                &self.lua,
+                &snapshot,
+                &window,
+                property,
+                old_value,
+                new_value,
+            )?,
+        )
+    }
+
     pub fn trigger_resolve_focus(
         &self,
         state: &mut EvilWm,
@@ -181,6 +223,7 @@ impl LiveLuaHooks {
                     pointer: request.pointer,
                     button: request.button,
                     pressed: request.pressed,
+                    modifiers: request.modifiers,
                 },
             )?,
         )
@@ -501,20 +544,33 @@ fn register_live_api(
     lua: &Lua,
     action_queue: &Rc<RefCell<Vec<HookAction>>>,
     query_snapshot: &Rc<RefCell<Option<RuntimeStateSnapshot>>>,
+    allow_setup_calls_during_load: &Rc<RefCell<bool>>,
 ) -> Result<(), ConfigError> {
     let evil = lua.create_table()?;
 
-    let config = lua.create_function(|_, _: Table| -> mlua::Result<()> {
+    let allow_config = allow_setup_calls_during_load.clone();
+    let config = lua.create_function(move |_, _: Table| -> mlua::Result<()> {
+        if *allow_config.borrow() {
+            return Ok(());
+        }
         Err(config_time_only_error("evil.config"))
     })?;
     evil.set("config", config)?;
 
-    let bind = lua.create_function(|_, _: Value| -> mlua::Result<()> {
+    let allow_bind = allow_setup_calls_during_load.clone();
+    let bind = lua.create_function(move |_, _: Value| -> mlua::Result<()> {
+        if *allow_bind.borrow() {
+            return Ok(());
+        }
         Err(config_time_only_error("evil.bind"))
     })?;
     evil.set("bind", bind)?;
 
-    let autostart = lua.create_function(|_, _: String| -> mlua::Result<()> {
+    let allow_autostart = allow_setup_calls_during_load.clone();
+    let autostart = lua.create_function(move |_, _: String| -> mlua::Result<()> {
+        if *allow_autostart.borrow() {
+            return Ok(());
+        }
         Err(config_time_only_error("evil.autostart"))
     })?;
     evil.set("autostart", autostart)?;
@@ -549,6 +605,36 @@ fn register_live_api(
         Ok(outputs)
     })?;
     output_table.set("list", list_outputs)?;
+
+    let get_output_snapshot = query_snapshot.clone();
+    let get_output = lua.create_function(move |lua, id: String| {
+        let snapshot = current_live_snapshot(&get_output_snapshot)?;
+        find_output_snapshot(&snapshot, &id)
+            .map(|output| output_to_table(lua, &output))
+            .transpose()
+    })?;
+    output_table.set("get", get_output)?;
+
+    let primary_output_snapshot = query_snapshot.clone();
+    let primary_output = lua.create_function(move |lua, ()| {
+        let snapshot = current_live_snapshot(&primary_output_snapshot)?;
+        find_primary_output_snapshot(&snapshot)
+            .map(|output| output_to_table(lua, &output))
+            .transpose()
+    })?;
+    output_table.set("primary", primary_output)?;
+
+    let pointer_output_snapshot = query_snapshot.clone();
+    let output_at_pointer = lua.create_function(move |lua, ()| {
+        let snapshot = current_live_snapshot(&pointer_output_snapshot)?;
+        find_output_snapshot_at_point(
+            &snapshot,
+            Point::new(snapshot.pointer.x, snapshot.pointer.y),
+        )
+        .map(|output| output_to_table(lua, &output))
+        .transpose()
+    })?;
+    output_table.set("at_pointer", output_at_pointer)?;
     evil.set("output", output_table)?;
 
     let window = lua.create_table()?;
@@ -580,6 +666,33 @@ fn register_live_api(
             Ok(true)
         })?;
     window.set("set_bounds", set_bounds)?;
+
+    let begin_move_queue = action_queue.clone();
+    let begin_move = lua.create_function(move |_, id: u64| {
+        begin_move_queue
+            .borrow_mut()
+            .push(HookAction::BeginInteractiveMove { id });
+        Ok(true)
+    })?;
+    window.set("begin_move", begin_move)?;
+
+    let begin_resize_queue = action_queue.clone();
+    let begin_resize = lua.create_function(move |_, (id, edges): (u64, Table)| {
+        let edges = crate::window::ResizeEdges {
+            left: edges.get::<Option<bool>>("left")?.unwrap_or(false),
+            right: edges.get::<Option<bool>>("right")?.unwrap_or(false),
+            top: edges.get::<Option<bool>>("top")?.unwrap_or(false),
+            bottom: edges.get::<Option<bool>>("bottom")?.unwrap_or(false),
+        };
+        if !(edges.left || edges.right || edges.top || edges.bottom) {
+            return Ok(false);
+        }
+        begin_resize_queue
+            .borrow_mut()
+            .push(HookAction::BeginInteractiveResize { id, edges });
+        Ok(true)
+    })?;
+    window.set("begin_resize", begin_resize)?;
 
     let focus_queue = action_queue.clone();
     let focus = lua.create_function(move |_, id: u64| {
@@ -729,10 +842,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn live_query_helpers_read_current_hook_snapshot() {
-        let hooks = LiveLuaHooks::new(".").expect("live hooks");
-        hooks.set_query_snapshot_for_tests(Some(RuntimeStateSnapshot {
+    fn sample_snapshot() -> RuntimeStateSnapshot {
+        RuntimeStateSnapshot {
             focused_window_id: Some(7),
             pointer: PointerSnapshot { x: 320.0, y: 180.0 },
             outputs: vec![OutputSnapshot {
@@ -756,8 +867,22 @@ mod tests {
                 floating: true,
                 exclude_from_focus: false,
                 focused: true,
+                fullscreen: false,
+                maximized: false,
+                urgent: false,
+                mapped: true,
+                mapped_at: Some(1_000_000.0),
+                last_focused_at: None,
+                output_id: Some("nested".into()),
+                pid: None,
             }],
-        }));
+        }
+    }
+
+    #[test]
+    fn live_query_helpers_read_current_hook_snapshot() {
+        let hooks = LiveLuaHooks::new(".").expect("live hooks");
+        hooks.set_query_snapshot_for_tests(Some(sample_snapshot()));
 
         let value = hooks
             .eval_for_tests(
@@ -804,6 +929,122 @@ mod tests {
         assert_eq!(
             table.get::<f64>("viewport_zoom").expect("viewport zoom"),
             1.25
+        );
+    }
+
+    #[test]
+    fn live_output_helpers_cover_zero_single_and_multi_output_cases() {
+        let hooks = LiveLuaHooks::new(".").expect("live hooks");
+        hooks.set_query_snapshot_for_tests(Some(RuntimeStateSnapshot {
+            focused_window_id: None,
+            pointer: PointerSnapshot { x: 0.0, y: 0.0 },
+            outputs: Vec::new(),
+            windows: Vec::new(),
+        }));
+        let zero_value = hooks
+            .eval_for_tests(
+                r#"
+                return {
+                  primary_nil = evil.output.primary() == nil,
+                  pointer_nil = evil.output.at_pointer() == nil,
+                  get_nil = evil.output.get("missing") == nil,
+                }
+                "#,
+                "zero-outputs.lua",
+            )
+            .expect("eval zero outputs");
+        let Value::Table(zero_table) = zero_value else {
+            panic!("expected table result");
+        };
+        assert!(zero_table.get::<bool>("primary_nil").expect("primary_nil"));
+        assert!(zero_table.get::<bool>("pointer_nil").expect("pointer_nil"));
+        assert!(zero_table.get::<bool>("get_nil").expect("get_nil"));
+
+        hooks.set_query_snapshot_for_tests(Some(sample_snapshot()));
+        let single_value = hooks
+            .eval_for_tests(
+                r#"
+                local primary = evil.output.primary()
+                local pointer = evil.output.at_pointer()
+                local got = evil.output.get("nested")
+                return {
+                  primary_id = primary.id,
+                  pointer_id = pointer.id,
+                  got_id = got.id,
+                }
+                "#,
+                "single-output.lua",
+            )
+            .expect("eval single output");
+        let Value::Table(single_table) = single_value else {
+            panic!("expected table result");
+        };
+        assert_eq!(single_table.get::<String>("primary_id").expect("primary_id"), "nested");
+        assert_eq!(single_table.get::<String>("pointer_id").expect("pointer_id"), "nested");
+        assert_eq!(single_table.get::<String>("got_id").expect("got_id"), "nested");
+
+        let mut multi = sample_snapshot();
+        multi.outputs.push(OutputSnapshot {
+            id: "side".into(),
+            logical_x: 1280.0,
+            logical_y: 0.0,
+            viewport: ViewportSnapshot {
+                x: 0.0,
+                y: 0.0,
+                zoom: 1.0,
+                screen_w: 1920.0,
+                screen_h: 1080.0,
+                visible_world: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            },
+        });
+        multi.pointer = PointerSnapshot { x: 1500.0, y: 200.0 };
+        hooks.set_query_snapshot_for_tests(Some(multi));
+        let multi_value = hooks
+            .eval_for_tests(
+                r#"
+                local outputs = evil.output.list()
+                local primary = evil.output.primary()
+                local pointer = evil.output.at_pointer()
+                local got = evil.output.get("side")
+                return {
+                  count = #outputs,
+                  primary_id = primary.id,
+                  pointer_id = pointer.id,
+                  got_id = got.id,
+                  bounds_x = got.bounds.x,
+                  logical_bounds_x = got.logical_bounds.x,
+                  screen_bounds_x = got.screen_bounds.x,
+                  visible_world_w = got.visible_world.w,
+                }
+                "#,
+                "multi-output.lua",
+            )
+            .expect("eval multi output");
+        let Value::Table(multi_table) = multi_value else {
+            panic!("expected table result");
+        };
+        assert_eq!(multi_table.get::<i64>("count").expect("count"), 2);
+        assert_eq!(multi_table.get::<String>("primary_id").expect("primary_id"), "nested");
+        assert_eq!(multi_table.get::<String>("pointer_id").expect("pointer_id"), "side");
+        assert_eq!(multi_table.get::<String>("got_id").expect("got_id"), "side");
+        assert_eq!(multi_table.get::<f64>("bounds_x").expect("bounds_x"), 1280.0);
+        assert_eq!(
+            multi_table
+                .get::<f64>("logical_bounds_x")
+                .expect("logical_bounds_x"),
+            1280.0
+        );
+        assert_eq!(
+            multi_table
+                .get::<f64>("screen_bounds_x")
+                .expect("screen_bounds_x"),
+            0.0
+        );
+        assert_eq!(
+            multi_table
+                .get::<f64>("visible_world_w")
+                .expect("visible_world_w"),
+            1920.0
         );
     }
 

@@ -29,7 +29,7 @@ use smithay::{
     reexports::{
         calloop::{EventLoop, LoopHandle, RegistrationToken},
         drm::control::{Device as ControlDevice, ModeTypeFlags, connector, crtc},
-        input::Libinput,
+        input::{Libinput, TapButtonMap},
         rustix::fs::OFlags,
         wayland_server::{Display, backend::GlobalId},
     },
@@ -82,6 +82,44 @@ fn total_surface_count(tracked_devices: &HashMap<DrmNode, TrackedDrmDevice>) -> 
         .sum()
 }
 
+fn configure_libinput_device(device: &mut smithay::reexports::input::Device) {
+    println!("libinput device added: {}", device.name());
+
+    let tap_fingers = device.config_tap_finger_count();
+    if tap_fingers == 0 {
+        return;
+    }
+
+    match device.config_tap_set_enabled(true) {
+        Ok(()) => {
+            println!(
+                "enabled tap-to-click for {} ({} finger tap support)",
+                device.name(),
+                tap_fingers
+            );
+        }
+        Err(error) => {
+            eprintln!(
+                "failed to enable tap-to-click for {}: {error:?}",
+                device.name()
+            );
+            return;
+        }
+    }
+
+    match device.config_tap_set_button_map(TapButtonMap::LeftRightMiddle) {
+        Ok(()) => {
+            println!("using left-right-middle tap map for {}", device.name());
+        }
+        Err(error) => {
+            eprintln!(
+                "failed to set tap button map for {}: {error:?}",
+                device.name()
+            );
+        }
+    }
+}
+
 fn render_tracked_surface(
     state: &mut EvilWm,
     renderer: &mut GlesRenderer,
@@ -92,21 +130,60 @@ fn render_tracked_surface(
     state.cleanup_window_bookkeeping();
     state.popups.cleanup();
 
-    let cursor_elements = build_cursor_elements(state, &surface.output);
-    let background_elements = solid_elements_from_draw_commands(state, &surface.output, "draw_background");
-    let overlay_elements = solid_elements_from_draw_commands(state, &surface.output, "draw_overlay");
-    let space_elements = build_live_space_elements(state, renderer, &surface.output);
+    let mut cursor_elements = Some(build_cursor_elements(state, &surface.output));
+    let mut background_elements = Some(solid_elements_from_draw_commands(
+        state,
+        &surface.output,
+        "draw_background",
+    ));
+    let mut overlay_elements = Some({
+        let mut elements =
+            solid_elements_from_draw_commands(state, &surface.output, "draw_overlay");
+        elements.extend(super::lock_overlay_elements(state, &surface.output));
+        elements
+    });
+    let mut space_elements = Some(build_live_space_elements(state, renderer, &surface.output));
 
     let mut elements = Vec::<UdevRenderElements<GlesRenderer, _>>::with_capacity(
-        cursor_elements.len()
-            + background_elements.len()
-            + overlay_elements.len()
-            + space_elements.len(),
+        cursor_elements.as_ref().map_or(0, Vec::len)
+            + background_elements.as_ref().map_or(0, Vec::len)
+            + overlay_elements.as_ref().map_or(0, Vec::len)
+            + space_elements.as_ref().map_or(0, Vec::len),
     );
-    elements.extend(background_elements.into_iter().map(UdevRenderElements::Custom));
-    elements.extend(space_elements.into_iter().map(UdevRenderElements::Space));
-    elements.extend(overlay_elements.into_iter().map(UdevRenderElements::Custom));
-    elements.extend(cursor_elements.into_iter().map(UdevRenderElements::Custom));
+    // Lua config stores the stack bottom-to-top, but Smithay consumes render
+    // elements front-to-back.
+    for layer in crate::compositor::render_stack_front_to_back(state) {
+        match layer {
+            crate::lua::DrawLayer::Background => elements.extend(
+                background_elements
+                    .take()
+                    .into_iter()
+                    .flatten()
+                    .map(UdevRenderElements::Custom),
+            ),
+            crate::lua::DrawLayer::Windows => elements.extend(
+                space_elements
+                    .take()
+                    .into_iter()
+                    .flatten()
+                    .map(UdevRenderElements::Space),
+            ),
+            crate::lua::DrawLayer::Overlay => elements.extend(
+                overlay_elements
+                    .take()
+                    .into_iter()
+                    .flatten()
+                    .map(UdevRenderElements::Custom),
+            ),
+            crate::lua::DrawLayer::Cursor => elements.extend(
+                cursor_elements
+                    .take()
+                    .into_iter()
+                    .flatten()
+                    .map(UdevRenderElements::Custom),
+            ),
+        }
+    }
 
     let render_result = surface
         .compositor
@@ -191,8 +268,27 @@ fn render_if_needed(
     state: &mut EvilWm,
     tracked_devices: &Rc<RefCell<HashMap<DrmNode, TrackedDrmDevice>>>,
 ) {
+    if !state.tty_session_active {
+        return;
+    }
     let mut tracked_devices = tracked_devices.borrow_mut();
     render_devices_if_needed(state, &mut tracked_devices);
+}
+
+fn reset_tracked_surface_states(tracked_devices: &Rc<RefCell<HashMap<DrmNode, TrackedDrmDevice>>>) {
+    for (node, device) in tracked_devices.borrow_mut().iter_mut() {
+        for (crtc, surface) in device.surfaces.iter_mut() {
+            if let Err(error) = surface.compositor.reset_state() {
+                eprintln!(
+                    "failed to reset DRM compositor state on {:?} {:?}: {error}",
+                    node, crtc
+                );
+            } else {
+                surface.frame_pending = false;
+                println!("reset DRM compositor state on {:?} {:?}", node, crtc);
+            }
+        }
+    }
 }
 
 fn remove_published_outputs(
@@ -214,6 +310,7 @@ fn remove_published_outputs(
         state.tty_no_scanout_warned = false;
         state.sync_output_positions_to_viewport();
         state.sync_primary_output_state_from_space();
+        state.notify_output_management_state();
         if state.space.outputs().next().is_some() {
             state.center_pointer_on_primary_output();
         }
@@ -336,6 +433,7 @@ fn publish_drm_outputs(
         {
             state.output_state = primary;
         }
+        state.notify_output_management_state();
 
         let chosen_crtc = info
             .current_encoder()
@@ -452,6 +550,7 @@ fn publish_drm_outputs(
     state.tty_no_scanout_warned = false;
     state.sync_output_positions_to_viewport();
     state.sync_primary_output_state_from_space();
+    state.notify_output_management_state();
     if state.window_models.is_empty() {
         state.center_pointer_on_primary_output();
     }
@@ -508,7 +607,7 @@ pub fn run_udev(options: RuntimeOptions) -> Result<(), Box<dyn Error>> {
         .insert_source(libinput_backend, move |mut event, _, state| {
             match &mut event {
                 InputEvent::DeviceAdded { device } => {
-                    println!("libinput device added: {}", device.name());
+                    configure_libinput_device(device);
                 }
                 InputEvent::DeviceRemoved { device } => {
                     println!("libinput device removed: {}", device.name());
@@ -522,57 +621,36 @@ pub fn run_udev(options: RuntimeOptions) -> Result<(), Box<dyn Error>> {
     let tracked_devices = Rc::new(RefCell::new(HashMap::<DrmNode, TrackedDrmDevice>::new()));
     let known_paths = Rc::new(RefCell::new(HashMap::<DrmNode, PathBuf>::new()));
     let tracked_for_session = tracked_devices.clone();
-    let known_paths_for_session = known_paths.clone();
-    let session_for_resume = session.clone();
-    let loop_handle_for_resume = loop_handle.clone();
+    let mut libinput_for_session = libinput_context.clone();
     event_loop
         .handle()
         .insert_source(notifier, move |event, &mut (), state| match event {
             SessionEvent::PauseSession => {
                 println!("pausing tty session");
-                libinput_context.suspend();
-                let nodes = tracked_for_session
-                    .borrow()
-                    .keys()
-                    .copied()
-                    .collect::<Vec<_>>();
-                for node in nodes {
-                    remove_published_outputs(
-                        &loop_handle_for_resume,
-                        state,
-                        &tracked_for_session,
-                        node,
-                    );
+                state.emit_event("tty_session_paused", serde_json::json!({}));
+                state.tty_session_active = false;
+                libinput_for_session.suspend();
+                for device in tracked_for_session.borrow_mut().values_mut() {
+                    for surface in device.surfaces.values_mut() {
+                        surface.frame_pending = false;
+                    }
                 }
             }
             SessionEvent::ActivateSession => {
                 println!("activating tty session");
-                if let Err(error) = libinput_context.resume() {
+                if let Err(error) = libinput_for_session.resume() {
+                    state.emit_event(
+                        "tty_session_activation_failed",
+                        serde_json::json!({ "error": format!("{error:?}") }),
+                    );
                     eprintln!("failed to resume libinput context: {error:?}");
                     state.loop_signal.stop();
                     return;
                 }
 
-                let resume_paths = known_paths_for_session
-                    .borrow()
-                    .iter()
-                    .map(|(node, path)| (*node, path.clone()))
-                    .collect::<Vec<_>>();
-
-                for (node, path) in resume_paths {
-                    if let Err(error) = publish_drm_outputs(
-                        &loop_handle_for_resume,
-                        state,
-                        &session_for_resume,
-                        &tracked_for_session,
-                        &known_paths_for_session,
-                        node,
-                        &path,
-                    ) {
-                        eprintln!("failed to rebuild DRM node {:?} on resume: {error}", node);
-                    }
-                }
-
+                state.emit_event("tty_session_activated", serde_json::json!({}));
+                state.tty_session_active = true;
+                reset_tracked_surface_states(&tracked_for_session);
                 state.request_redraw();
                 render_if_needed(state, &tracked_for_session);
             }
@@ -599,6 +677,7 @@ pub fn run_udev(options: RuntimeOptions) -> Result<(), Box<dyn Error>> {
     let tracked_for_udev = tracked_devices.clone();
     let known_paths_for_udev = known_paths.clone();
     let session_for_udev = session.clone();
+    let loop_handle_for_udev = loop_handle.clone();
     event_loop
         .handle()
         .insert_source(udev_backend, move |event, _, state| match event {
@@ -606,7 +685,7 @@ pub fn run_udev(options: RuntimeOptions) -> Result<(), Box<dyn Error>> {
                 println!("udev drm device added: {:?} {:?}", device_id, path);
                 if let Ok(node) = DrmNode::from_dev_id(device_id)
                     && let Err(error) = publish_drm_outputs(
-                        &loop_handle,
+                        &loop_handle_for_udev,
                         state,
                         &session_for_udev,
                         &tracked_for_udev,
@@ -628,7 +707,7 @@ pub fn run_udev(options: RuntimeOptions) -> Result<(), Box<dyn Error>> {
                         .or_else(|| known_paths_for_udev.borrow().get(&node).cloned());
                     if let Some(path) = path
                         && let Err(error) = publish_drm_outputs(
-                            &loop_handle,
+                            &loop_handle_for_udev,
                             state,
                             &session_for_udev,
                             &tracked_for_udev,
@@ -645,20 +724,39 @@ pub fn run_udev(options: RuntimeOptions) -> Result<(), Box<dyn Error>> {
                 println!("udev drm device removed: {:?}", device_id);
                 if let Ok(node) = DrmNode::from_dev_id(device_id) {
                     known_paths_for_udev.borrow_mut().remove(&node);
-                    remove_published_outputs(&loop_handle, state, &tracked_for_udev, node);
+                    remove_published_outputs(&loop_handle_for_udev, state, &tracked_for_udev, node);
                 }
             }
         })?;
 
+    #[cfg(feature = "xwayland")]
+    super::spawn_xwayland(&state.display_handle, &event_loop.handle());
+
+    println!("evilwm ipc socket at {}", state.ipc_socket_path.display());
     println!(
         "evilwm udev renderer running on seat={} WAYLAND_DISPLAY={} drm_devices={}",
         seat_name,
         state.socket_name.to_string_lossy(),
         initial_device_count
     );
+    state.emit_event(
+        "tty_backend_started",
+        serde_json::json!({
+            "seat": seat_name,
+            "wayland_display": state.socket_name.to_string_lossy(),
+            "drm_devices": initial_device_count,
+            "config_path": options
+                .config_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
+        }),
+    );
     if let Some(path) = options.config_path.as_deref() {
         println!("loaded config: {}", path.display());
     }
+    println!(
+        "tty startup note: use a spare VT, keep this console output for diagnostics, and prefer the launcher script for the supported flow"
+    );
     if initial_device_count == 0 {
         println!("warning: no DRM devices detected by udev yet");
     }
@@ -666,7 +764,7 @@ pub fn run_udev(options: RuntimeOptions) -> Result<(), Box<dyn Error>> {
     publish_wayland_display(&state.socket_name);
     for command in startup_commands {
         println!("spawning client: {command}");
-        spawn_client(&command, &state.socket_name);
+        spawn_client(&command, &state.socket_name, &state.ipc_socket_path);
     }
 
     let tracked_for_run = tracked_devices.clone();
@@ -677,5 +775,14 @@ pub fn run_udev(options: RuntimeOptions) -> Result<(), Box<dyn Error>> {
         state.popups.cleanup();
         let _ = state.display_handle.flush_clients();
     })?;
+
+    println!("shutting down tty backend");
+    state.emit_event("tty_backend_shutdown", serde_json::json!({}));
+    libinput_context.suspend();
+    let nodes = tracked_devices.borrow().keys().copied().collect::<Vec<_>>();
+    for node in nodes {
+        remove_published_outputs(&loop_handle, &mut state, &tracked_devices, node);
+    }
+
     Ok(())
 }

@@ -1,16 +1,20 @@
-use std::path::PathBuf;
+use std::{
+    io::{Read, Write},
+    os::unix::net::UnixStream,
+    path::PathBuf,
+};
 
 #[cfg(feature = "lua")]
 use std::path::Path;
 
 use clap::{Parser, ValueEnum};
 
-use evilwm::headless::{HeadlessOptions, run_headless};
-use evilwm::ipc::RuntimeSnapshot;
 #[cfg(feature = "udev")]
 use evilwm::compositor::run_udev;
 #[cfg(any(feature = "winit", feature = "x11", feature = "udev"))]
 use evilwm::compositor::{RuntimeOptions, run_winit};
+use evilwm::headless::{HeadlessOptions, run_headless};
+use evilwm::ipc::{IpcRequest, IpcResponse, RuntimeSnapshot};
 #[cfg(feature = "lua")]
 use evilwm::lua::LuaRuntime;
 
@@ -20,6 +24,15 @@ enum Backend {
     Winit,
     Udev,
     Headless,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+enum IpcCommand {
+    Snapshot,
+    Quit,
+    Lock,
+    Unlock,
+    Screenshot,
 }
 
 impl Backend {
@@ -49,6 +62,12 @@ struct Cli {
     command: Option<String>,
     #[arg(long)]
     dump_state_json: bool,
+    #[arg(long)]
+    ipc_socket: Option<PathBuf>,
+    #[arg(long, value_enum)]
+    ipc_command: Option<IpcCommand>,
+    #[arg(long)]
+    ipc_arg: Option<String>,
 }
 
 fn main() {
@@ -58,6 +77,11 @@ fn main() {
 
     if cli.check_config {
         run_config_check(&cli);
+        return;
+    }
+
+    if cli.ipc_command.is_some() {
+        run_ipc_command(&cli);
         return;
     }
 
@@ -76,6 +100,60 @@ fn init_logging() {
     } else {
         tracing_subscriber::fmt().init();
     }
+}
+
+fn run_ipc_command(cli: &Cli) {
+    let Some(socket_path) = cli.ipc_socket.as_deref() else {
+        eprintln!("--ipc-command requires --ipc-socket <path>");
+        std::process::exit(2);
+    };
+    let Some(command) = cli.ipc_command else {
+        eprintln!("missing --ipc-command");
+        std::process::exit(2);
+    };
+
+    let request = match command {
+        IpcCommand::Snapshot => IpcRequest::GetRuntimeSnapshot,
+        IpcCommand::Quit => IpcRequest::Quit,
+        IpcCommand::Lock => IpcRequest::Lock,
+        IpcCommand::Unlock => IpcRequest::Unlock,
+        IpcCommand::Screenshot => {
+            let Some(path) = cli.ipc_arg.as_deref() else {
+                eprintln!("--ipc-command screenshot requires --ipc-arg <path>");
+                std::process::exit(2);
+            };
+            IpcRequest::Screenshot {
+                path: PathBuf::from(path),
+            }
+        }
+    };
+    let response =
+        send_ipc_request(socket_path, &request).unwrap_or_else(|error| report_fatal(error));
+    println!(
+        "{}",
+        response
+            .to_json_pretty()
+            .unwrap_or_else(|error| report_fatal(error))
+    );
+    if matches!(response, IpcResponse::Error { .. }) {
+        std::process::exit(1);
+    }
+}
+
+fn send_ipc_request(
+    socket_path: &std::path::Path,
+    request: &IpcRequest,
+) -> Result<IpcResponse, std::io::Error> {
+    let mut stream = UnixStream::connect(socket_path)?;
+    let payload = serde_json::to_vec(request)
+        .map_err(|error| std::io::Error::other(format!("serialize ipc request failed: {error}")))?;
+    stream.write_all(&payload)?;
+    stream.shutdown(std::net::Shutdown::Write)?;
+
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    serde_json::from_str(&response)
+        .map_err(|error| std::io::Error::other(format!("parse ipc response failed: {error}")))
 }
 
 #[cfg(feature = "lua")]
@@ -267,10 +345,7 @@ mod tests {
 
     #[test]
     fn config_backend_is_used_when_cli_backend_is_omitted() {
-        assert_eq!(
-            resolve_backend_choice(None, Some("udev")),
-            Backend::Udev
-        );
+        assert_eq!(resolve_backend_choice(None, Some("udev")), Backend::Udev);
     }
 
     #[test]

@@ -54,7 +54,7 @@ pub struct HeadlessReport {
     pub min_zoom: f64,
     pub max_zoom: f64,
     pub visible_world: Rect,
-    pub preview_window_bounds: Rect,
+    pub next_placement: Rect,
     pub bindings: usize,
     pub rules: usize,
     pub autostart: usize,
@@ -70,8 +70,11 @@ impl HeadlessSession {
         } = options;
 
         let mut viewport = Viewport::new(screen_size);
-        if let Some(cfg) = &config {
-            viewport = viewport.with_zoom_limits(cfg.canvas.min_zoom, cfg.canvas.max_zoom);
+        if let Some(cfg) = &config
+            && let Ok(configured) =
+                viewport.clone().try_with_zoom_limits(cfg.canvas.min_zoom, cfg.canvas.max_zoom)
+        {
+            viewport = configured;
         }
 
         let bindings = config
@@ -116,7 +119,7 @@ impl HeadlessSession {
         self.focus_stack.focused()
     }
 
-    pub fn preview_window_bounds(&self) -> Rect {
+    pub fn next_placement(&self) -> Rect {
         let existing = self.window_models.values().cloned().collect::<Vec<_>>();
         self.fallback_placement_policy
             .place_new_window(self.viewport(), &existing, None)
@@ -287,7 +290,7 @@ impl HeadlessSession {
 
     pub fn report(&self) -> HeadlessReport {
         let visible_world = self.viewport().visible_world_rect();
-        let preview_window_bounds = self.preview_window_bounds();
+        let next_placement = self.next_placement();
 
         HeadlessReport {
             config_loaded: self.config.is_some(),
@@ -296,7 +299,7 @@ impl HeadlessSession {
             min_zoom: self.config.as_ref().map_or(0.1, |cfg| cfg.canvas.min_zoom),
             max_zoom: self.config.as_ref().map_or(8.0, |cfg| cfg.canvas.max_zoom),
             visible_world,
-            preview_window_bounds,
+            next_placement,
             bindings: self.config.as_ref().map_or(0, |cfg| cfg.bindings.len()),
             rules: self.config.as_ref().map_or(0, |cfg| cfg.rules.len()),
             autostart: self.config.as_ref().map_or(0, |cfg| cfg.autostart.len()),
@@ -319,10 +322,10 @@ impl std::fmt::Display for HeadlessReport {
             self.bindings,
             self.rules,
             self.autostart,
-            self.preview_window_bounds.origin.x,
-            self.preview_window_bounds.origin.y,
-            self.preview_window_bounds.size.w,
-            self.preview_window_bounds.size.h,
+            self.next_placement.origin.x,
+            self.next_placement.origin.y,
+            self.next_placement.size.w,
+            self.next_placement.size.h,
         )
     }
 }
@@ -338,6 +341,14 @@ impl ActionTarget for HeadlessSession {
 
     fn set_window_bounds(&mut self, id: WindowId, bounds: Rect) -> bool {
         Self::set_window_bounds(self, id, bounds)
+    }
+
+    fn begin_interactive_move(&mut self, _id: WindowId) -> bool {
+        false
+    }
+
+    fn begin_interactive_resize(&mut self, _id: WindowId, _edges: crate::window::ResizeEdges) -> bool {
+        false
     }
 
     fn focus_window(&mut self, id: WindowId) -> bool {

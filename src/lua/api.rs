@@ -1,8 +1,18 @@
-use crate::{canvas::Rect, window::WindowId};
+use crate::{canvas::Rect, window::{ResizeEdges, WindowId}};
 use mlua::{Lua, Table, Value};
 
 use super::ConfigError;
 
+/// A point-in-time snapshot of a mapped window, passed to Lua hooks and query helpers.
+///
+/// Field stability:
+/// - **guaranteed**: `id`, `app_id`, `title`, `bounds`, `floating`, `exclude_from_focus`,
+///   `focused`, `fullscreen`, `maximized`, `urgent`, `mapped`
+/// - **provisional**: `mapped_at`, `last_focused_at` (seconds since Unix epoch; available once
+///   the runtime records the timestamps)
+/// - **optional/backend-dependent**: `pid` (None in headless and when the live compositor cannot
+///   determine the client PID), `output_id` (None when the window center is not inside any
+///   output's visible world)
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowSnapshot {
     pub id: u64,
@@ -12,6 +22,24 @@ pub struct WindowSnapshot {
     pub floating: bool,
     pub exclude_from_focus: bool,
     pub focused: bool,
+    /// Whether this window is currently in fullscreen state.
+    pub fullscreen: bool,
+    /// Whether this window is currently in maximized state.
+    pub maximized: bool,
+    /// Whether this window has an urgency hint set.
+    pub urgent: bool,
+    /// Always `true` for windows in the active snapshot (only mapped windows are included).
+    pub mapped: bool,
+    /// Unix epoch seconds at which this window was first mapped. Provisional.
+    pub mapped_at: Option<f64>,
+    /// Unix epoch seconds at which this window most recently gained focus. Provisional.
+    /// `None` until the first focus event.
+    pub last_focused_at: Option<f64>,
+    /// ID of the output whose visible world contains this window's center point.
+    /// `None` if the window is not visible on any output.
+    pub output_id: Option<String>,
+    /// Process ID of the owning client. Optional/backend-dependent.
+    pub pid: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -92,6 +120,13 @@ pub enum HookAction {
         y: f64,
         w: f64,
         h: f64,
+    },
+    BeginInteractiveMove {
+        id: u64,
+    },
+    BeginInteractiveResize {
+        id: u64,
+        edges: ResizeEdges,
     },
     FocusWindow {
         id: u64,
@@ -185,6 +220,13 @@ impl HookAction {
                 w: table.get::<f64>("w")?,
                 h: table.get::<f64>("h")?,
             }),
+            "begin_move" => Ok(Self::BeginInteractiveMove {
+                id: table.get::<u64>("id")?,
+            }),
+            "begin_resize" => Ok(Self::BeginInteractiveResize {
+                id: table.get::<u64>("id")?,
+                edges: parse_resize_edges(table.get::<Table>("edges")?)?,
+            }),
             "focus_window" => Ok(Self::FocusWindow {
                 id: table.get::<u64>("id")?,
             }),
@@ -265,6 +307,23 @@ fn parse_draw_space(space: Option<&str>) -> Result<DrawSpace, ConfigError> {
     }
 }
 
+fn parse_resize_edges(table: Table) -> Result<ResizeEdges, ConfigError> {
+    let edges = ResizeEdges {
+        left: table.get::<Option<bool>>("left")?.unwrap_or(false),
+        right: table.get::<Option<bool>>("right")?.unwrap_or(false),
+        top: table.get::<Option<bool>>("top")?.unwrap_or(false),
+        bottom: table.get::<Option<bool>>("bottom")?.unwrap_or(false),
+    };
+
+    if !(edges.left || edges.right || edges.top || edges.bottom) {
+        return Err(ConfigError::Validation(
+            "begin_resize requires at least one resize edge".into(),
+        ));
+    }
+
+    Ok(edges)
+}
+
 fn parse_color(table: Table) -> Result<[f32; 4], ConfigError> {
     let values = [
         table.get::<f32>(1)?,
@@ -286,6 +345,8 @@ pub trait ActionTarget {
     fn move_window(&mut self, id: WindowId, x: f64, y: f64) -> bool;
     fn resize_window(&mut self, id: WindowId, w: f64, h: f64) -> bool;
     fn set_window_bounds(&mut self, id: WindowId, bounds: Rect) -> bool;
+    fn begin_interactive_move(&mut self, id: WindowId) -> bool;
+    fn begin_interactive_resize(&mut self, id: WindowId, edges: ResizeEdges) -> bool;
     fn focus_window(&mut self, id: WindowId) -> bool;
     fn clear_focus(&mut self) -> bool;
     fn close_window(&mut self, id: WindowId) -> bool;
@@ -324,6 +385,28 @@ pub fn apply_hook_action<T: ActionTarget>(target: &mut T, action: HookAction) ->
             } else {
                 Err(ConfigError::Validation(format!(
                     "hook action set_bounds failed for window id {}",
+                    id.0
+                )))
+            }
+        }
+        HookAction::BeginInteractiveMove { id } => {
+            let id = WindowId(id);
+            if target.begin_interactive_move(id) {
+                Ok(())
+            } else {
+                Err(ConfigError::Validation(format!(
+                    "hook action begin_move failed for window id {}",
+                    id.0
+                )))
+            }
+        }
+        HookAction::BeginInteractiveResize { id, edges } => {
+            let id = WindowId(id);
+            if target.begin_interactive_resize(id, edges) {
+                Ok(())
+            } else {
+                Err(ConfigError::Validation(format!(
+                    "hook action begin_resize failed for window id {}",
                     id.0
                 )))
             }

@@ -14,11 +14,12 @@ name = "evilwm"
 path = "src/main.rs"
 
 [features]
-default = ["winit", "lua"]
+default = ["winit", "lua", "xwayland"]
 x11 = ["smithay/backend_x11"]
 winit = ["smithay/backend_winit", "smithay/desktop", "smithay/wayland_frontend"]
 udev = ["smithay/backend_drm", "smithay/backend_gbm", "smithay/backend_libinput", "smithay/backend_udev", "smithay/backend_session_libseat"]
 lua = ["dep:mlua"]
+xwayland = ["smithay/xwayland"]
 headless-test = []
 
 [dependencies]
@@ -27,10 +28,12 @@ mlua = { version = "0.11.6", optional = true, features = ["luau"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 smithay = { version = "0.7.0", default-features = false, features = ["backend_winit", "desktop", "wayland_frontend"] }
+tempfile = "3.23.0"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+wayland-client = "0.31.14"
+wayland-protocols = { version = "0.32.9", features = ["client"] }
+wayland-protocols-wlr = { version = "0.3.9", features = ["client"] }
+x11rb = "0.13.2"
 
 [dev-dependencies]
 approx = "0.5.1"
-tempfile = "3.23.0"
-wayland-client = "0.31.14"
-wayland-protocols = { version = "0.32.9", features = ["client"] }

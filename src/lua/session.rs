@@ -6,17 +6,21 @@ use std::{
 
 use mlua::{Function, Lua, Table, Value};
 
+use super::live::ResolveFocusRequest;
+
 use crate::{
     canvas::{Point, Rect, Vec2},
     headless::HeadlessSession,
     input::{ModifierSet, parse_keyspec},
     lua::{
-        ConfigError, HookAction, RuntimeStateSnapshot, WindowSnapshot, apply_hook_action,
-        register_draw_api,
+        ConfigError, HookAction, PropertyValue, RuntimeStateSnapshot, WindowSnapshot,
+        api::ActionTarget, apply_hook_action, register_draw_api,
         hook_support::{
-            ResolveFocusContext, delta_hook_context, find_window_snapshot, focus_hook_context,
-            focus_resolve_context, gesture_hook_context, key_hook_context, output_to_table,
-            rect_to_table, snapshot_to_table, window_hook_context, window_to_table,
+            ResolveFocusContext, delta_hook_context, find_output_snapshot,
+            find_output_snapshot_at_point, find_primary_output_snapshot, find_window_snapshot,
+            focus_hook_context, focus_resolve_context, gesture_hook_context, key_hook_context,
+            output_to_table, property_changed_hook_context, rect_to_table, snapshot_to_table,
+            window_hook_context, window_to_table,
         },
         parse_hook_actions,
     },
@@ -92,29 +96,46 @@ impl LuaSession {
         )
     }
 
-    pub fn trigger_resolve_focus(
+    /// Trigger `evil.on.window_property_changed` in the headless runtime.
+    ///
+    /// `ctx.window` reflects the **current** (new) state of the window.
+    pub fn trigger_window_property_changed(
         &self,
-        reason: &str,
-        window: Option<&WindowSnapshot>,
-        previous: Option<WindowId>,
-        pointer: Option<Point>,
-        button: Option<u32>,
-        pressed: Option<bool>,
+        id: WindowId,
+        property: &str,
+        old_value: &PropertyValue,
+        new_value: &PropertyValue,
     ) -> Result<bool, ConfigError> {
+        let (state, window) = self.snapshot_with_window(id)?;
+        self.call_hook(
+            "window_property_changed",
+            property_changed_hook_context(
+                &self.lua,
+                &state,
+                &window,
+                property,
+                old_value,
+                new_value,
+            )?,
+        )
+    }
+
+    pub fn trigger_resolve_focus(&self, request: ResolveFocusRequest<'_>) -> Result<bool, ConfigError> {
         let state = self.session.borrow().state_snapshot();
-        let previous_window = previous.and_then(|id| find_window_snapshot(&state, id));
+        let previous_window = request.previous.and_then(|id| find_window_snapshot(&state, id));
         self.call_hook(
             "resolve_focus",
             focus_resolve_context(
                 &self.lua,
                 ResolveFocusContext {
-                    reason,
+                    reason: request.reason,
                     state: &state,
-                    window,
+                    window: request.window,
                     previous: previous_window.as_ref(),
-                    pointer,
-                    button,
-                    pressed,
+                    pointer: request.pointer,
+                    button: request.button,
+                    pressed: request.pressed,
+                    modifiers: request.modifiers,
                 },
             )?,
         )
@@ -364,6 +385,36 @@ fn register_runtime_api(
         Ok(outputs)
     })?;
     output_table.set("list", list_outputs)?;
+
+    let get_output_session = session.clone();
+    let get_output = lua.create_function(move |lua, id: String| {
+        let snapshot = get_output_session.borrow().state_snapshot();
+        find_output_snapshot(&snapshot, &id)
+            .map(|output| output_to_table(lua, &output))
+            .transpose()
+    })?;
+    output_table.set("get", get_output)?;
+
+    let primary_output_session = session.clone();
+    let primary_output = lua.create_function(move |lua, ()| {
+        let snapshot = primary_output_session.borrow().state_snapshot();
+        find_primary_output_snapshot(&snapshot)
+            .map(|output| output_to_table(lua, &output))
+            .transpose()
+    })?;
+    output_table.set("primary", primary_output)?;
+
+    let pointer_output_session = session.clone();
+    let output_at_pointer = lua.create_function(move |lua, ()| {
+        let snapshot = pointer_output_session.borrow().state_snapshot();
+        find_output_snapshot_at_point(
+            &snapshot,
+            Point::new(snapshot.pointer.x, snapshot.pointer.y),
+        )
+        .map(|output| output_to_table(lua, &output))
+        .transpose()
+    })?;
+    output_table.set("at_pointer", output_at_pointer)?;
     evil.set("output", output_table)?;
 
     let window_table = lua.create_table()?;
@@ -436,6 +487,31 @@ fn register_runtime_api(
                 .set_window_bounds(WindowId(id), Rect::new(x, y, w, h)))
         })?;
     window_table.set("set_bounds", set_bounds)?;
+
+    let begin_move_session = session.clone();
+    let begin_move = lua.create_function(move |_, id: u64| {
+        Ok(begin_move_session
+            .borrow_mut()
+            .begin_interactive_move(WindowId(id)))
+    })?;
+    window_table.set("begin_move", begin_move)?;
+
+    let begin_resize_session = session.clone();
+    let begin_resize = lua.create_function(move |_, (id, edges): (u64, Table)| {
+        let edges = crate::window::ResizeEdges {
+            left: edges.get::<Option<bool>>("left")?.unwrap_or(false),
+            right: edges.get::<Option<bool>>("right")?.unwrap_or(false),
+            top: edges.get::<Option<bool>>("top")?.unwrap_or(false),
+            bottom: edges.get::<Option<bool>>("bottom")?.unwrap_or(false),
+        };
+        if !(edges.left || edges.right || edges.top || edges.bottom) {
+            return Ok(false);
+        }
+        Ok(begin_resize_session
+            .borrow_mut()
+            .begin_interactive_resize(WindowId(id), edges))
+    })?;
+    window_table.set("begin_resize", begin_resize)?;
 
     let close_session = session.clone();
     let close = lua.create_function(move |_, id: u64| {

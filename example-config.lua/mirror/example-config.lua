@@ -31,13 +31,13 @@ local function focused_window(ctx)
   end
 end
 
-local function primary_output(ctx)
-  return ctx.state.outputs[1]
+local function primary_output()
+  return evil.output.primary()
 end
 
 local function cascade_bounds(ctx)
-  local output = primary_output(ctx)
-  local visible = output and output.viewport and output.viewport.visible_world or { x = 0, y = 0, w = 1600, h = 900 }
+  local output = primary_output()
+  local visible = output and output.visible_world or { x = 0, y = 0, w = 1600, h = 900 }
   local focused = focused_window(ctx)
 
   local w = math.min(960, math.max(520, visible.w * 0.55))

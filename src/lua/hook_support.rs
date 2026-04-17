@@ -1,4 +1,4 @@
-use mlua::{Lua, Table};
+use mlua::{Lua, Table, Value};
 
 use crate::{
     canvas::{Point, Rect, Vec2},
@@ -6,6 +6,27 @@ use crate::{
     lua::{OutputSnapshot, RuntimeStateSnapshot, WindowSnapshot},
     window::{ResizeEdges, WindowId},
 };
+
+/// A typed property value passed to the `window_property_changed` hook context.
+///
+/// Covers the initial supported property types (string-valued and bool-valued window properties).
+#[derive(Debug, Clone, PartialEq)]
+pub enum PropertyValue {
+    /// An optional string (covers `title`, `app_id`). `None` maps to Lua `nil`.
+    OptionString(Option<String>),
+    /// A boolean (covers `floating`, `exclude_from_focus`, etc.).
+    Bool(bool),
+}
+
+impl PropertyValue {
+    fn to_lua_value(&self, lua: &Lua) -> mlua::Result<Value> {
+        match self {
+            PropertyValue::OptionString(Some(s)) => lua.create_string(s.as_str()).map(Value::String),
+            PropertyValue::OptionString(None) => Ok(Value::Nil),
+            PropertyValue::Bool(b) => Ok(Value::Boolean(*b)),
+        }
+    }
+}
 
 pub struct ResolveFocusContext<'a> {
     pub reason: &'a str,
@@ -15,6 +36,7 @@ pub struct ResolveFocusContext<'a> {
     pub pointer: Option<Point>,
     pub button: Option<u32>,
     pub pressed: Option<bool>,
+    pub modifiers: Option<ModifierSet>,
 }
 
 pub fn find_window_snapshot(state: &RuntimeStateSnapshot, id: WindowId) -> Option<WindowSnapshot> {
@@ -22,6 +44,34 @@ pub fn find_window_snapshot(state: &RuntimeStateSnapshot, id: WindowId) -> Optio
         .windows
         .iter()
         .find(|window| window.id == id.0)
+        .cloned()
+}
+
+pub fn find_output_snapshot(state: &RuntimeStateSnapshot, id: &str) -> Option<OutputSnapshot> {
+    state
+        .outputs
+        .iter()
+        .find(|output| output.id == id)
+        .cloned()
+}
+
+pub fn find_primary_output_snapshot(state: &RuntimeStateSnapshot) -> Option<OutputSnapshot> {
+    state.outputs.first().cloned()
+}
+
+pub fn find_output_snapshot_at_point(
+    state: &RuntimeStateSnapshot,
+    point: Point,
+) -> Option<OutputSnapshot> {
+    state
+        .outputs
+        .iter()
+        .find(|output| {
+            point.x >= output.logical_x
+                && point.x < output.logical_x + output.viewport.screen_w
+                && point.y >= output.logical_y
+                && point.y < output.logical_y + output.viewport.screen_h
+        })
         .cloned()
 }
 
@@ -136,6 +186,9 @@ pub fn focus_resolve_context(lua: &Lua, params: ResolveFocusContext<'_>) -> mlua
     if let Some(pressed) = params.pressed {
         context.set("pressed", pressed)?;
     }
+    if let Some(modifiers) = params.modifiers {
+        context.set("modifiers", modifiers_to_table(lua, modifiers)?)?;
+    }
 
     Ok(context)
 }
@@ -246,6 +299,21 @@ pub fn output_to_table(lua: &Lua, output: &OutputSnapshot) -> mlua::Result<Table
     )?;
     output_table.set("viewport", viewport)?;
 
+    let logical_bounds = Rect::new(
+        output.logical_x,
+        output.logical_y,
+        output.viewport.screen_w,
+        output.viewport.screen_h,
+    );
+    let screen_bounds = Rect::new(0.0, 0.0, output.viewport.screen_w, output.viewport.screen_h);
+    output_table.set("bounds", rect_to_table(lua, logical_bounds)?)?;
+    output_table.set("logical_bounds", rect_to_table(lua, logical_bounds)?)?;
+    output_table.set("screen_bounds", rect_to_table(lua, screen_bounds)?)?;
+    output_table.set(
+        "visible_world",
+        rect_to_table(lua, output.viewport.visible_world)?,
+    )?;
+
     Ok(output_table)
 }
 
@@ -262,6 +330,15 @@ pub fn window_to_table(lua: &Lua, window: &WindowSnapshot) -> mlua::Result<Table
     table.set("floating", window.floating)?;
     table.set("exclude_from_focus", window.exclude_from_focus)?;
     table.set("focused", window.focused)?;
+    // Phase 1A additions
+    table.set("fullscreen", window.fullscreen)?;
+    table.set("maximized", window.maximized)?;
+    table.set("urgent", window.urgent)?;
+    table.set("mapped", window.mapped)?;
+    table.set("mapped_at", window.mapped_at)?;
+    table.set("last_focused_at", window.last_focused_at)?;
+    table.set("output_id", window.output_id.as_deref())?;
+    table.set("pid", window.pid)?;
     Ok(table)
 }
 
@@ -290,4 +367,25 @@ pub fn rect_to_table(lua: &Lua, rect: Rect) -> mlua::Result<Table> {
     table.set("w", rect.size.w)?;
     table.set("h", rect.size.h)?;
     Ok(table)
+}
+
+/// Build the hook context table for `evil.on.window_property_changed`.
+///
+/// `ctx.window` reflects the **new** state after the property changed.
+/// `ctx.old_value` and `ctx.new_value` carry the before/after values explicitly.
+pub fn property_changed_hook_context(
+    lua: &Lua,
+    state: &RuntimeStateSnapshot,
+    window: &WindowSnapshot,
+    property: &str,
+    old_value: &PropertyValue,
+    new_value: &PropertyValue,
+) -> mlua::Result<Table> {
+    let context = base_hook_context(lua, "window_property_changed", state)?;
+    context.set("window", window_to_table(lua, window)?)?;
+    context.set("window_id", window.id)?;
+    context.set("property", property)?;
+    context.set("old_value", old_value.to_lua_value(lua)?)?;
+    context.set("new_value", new_value.to_lua_value(lua)?)?;
+    Ok(context)
 }

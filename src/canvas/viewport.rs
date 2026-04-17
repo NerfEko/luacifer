@@ -20,13 +20,23 @@ impl Viewport {
         }
     }
 
-    pub fn with_zoom_limits(mut self, min_zoom: f64, max_zoom: f64) -> Self {
-        assert!(min_zoom > 0.0, "min_zoom must be positive");
-        assert!(max_zoom >= min_zoom, "max_zoom must be >= min_zoom");
+    pub fn try_with_zoom_limits(mut self, min_zoom: f64, max_zoom: f64) -> Result<Self, String> {
+        if !min_zoom.is_finite() || min_zoom <= 0.0 {
+            return Err("min_zoom must be a positive finite number".into());
+        }
+        if !max_zoom.is_finite() || max_zoom < min_zoom {
+            return Err("max_zoom must be a finite number >= min_zoom".into());
+        }
         self.min_zoom = min_zoom;
         self.max_zoom = max_zoom;
         self.zoom = self.zoom.clamp(self.min_zoom, self.max_zoom);
-        self
+        Ok(self)
+    }
+
+    pub fn with_zoom_limits(self, min_zoom: f64, max_zoom: f64) -> Self {
+        self.clone()
+            .try_with_zoom_limits(min_zoom, max_zoom)
+            .unwrap_or(self)
     }
 
     pub fn world_origin(&self) -> Point {
@@ -79,7 +89,9 @@ impl Viewport {
     }
 
     pub fn zoom_at_screen(&mut self, anchor: Point, factor: f64) {
-        assert!(factor > 0.0, "zoom factor must be positive");
+        if !factor.is_finite() || factor <= 0.0 {
+            return;
+        }
         let anchored_world = self.screen_to_world(anchor);
         self.zoom = (self.zoom * factor).clamp(self.min_zoom, self.max_zoom);
         self.world_origin = Point::new(

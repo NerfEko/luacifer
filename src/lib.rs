@@ -7,4 +7,5 @@ pub mod ipc;
 #[cfg(feature = "lua")]
 pub mod lua;
 pub mod output;
+pub mod output_management_protocol;
 pub mod window;

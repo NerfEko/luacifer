@@ -51,7 +51,7 @@ impl PlacementPolicy {
             visible.origin.y + (visible.size.h - size.h) / 2.0,
         );
 
-        let cascade_factor = existing.len().min(8) as f64;
+        let cascade_factor = (existing.len() % 8) as f64;
         origin.x += self.cascade_step.x * cascade_factor;
         origin.y += self.cascade_step.y * cascade_factor;
 

@@ -39,6 +39,10 @@ impl ResizeEdges {
 
 impl Window {
     pub fn moved_by(&self, delta: Vec2) -> Self {
+        if !delta.x.is_finite() || !delta.y.is_finite() {
+            return self.clone();
+        }
+
         let mut window = self.clone();
         window.bounds.origin.x += delta.x;
         window.bounds.origin.y += delta.y;
@@ -46,6 +50,10 @@ impl Window {
     }
 
     pub fn resized_by(&self, delta: Vec2, edges: ResizeEdges, policy: ResizePolicy) -> Self {
+        if !delta.x.is_finite() || !delta.y.is_finite() {
+            return self.clone();
+        }
+
         let mut bounds = self.bounds;
 
         if edges.left {

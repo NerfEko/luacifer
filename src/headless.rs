@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
+    time::SystemTime,
 };
 
 use crate::{
@@ -62,7 +63,7 @@ pub struct HeadlessReport {
     pub min_zoom: f64,
     pub max_zoom: f64,
     pub visible_world: Rect,
-    pub preview_window_bounds: Rect,
+    pub next_placement: Rect,
     pub bindings: usize,
     pub rules: usize,
     pub autostart: usize,
@@ -82,8 +83,11 @@ impl HeadlessSession {
         #[cfg(not(feature = "lua"))]
         let viewport = Viewport::new(screen_size);
         #[cfg(feature = "lua")]
-        if let Some(cfg) = &config {
-            viewport = viewport.with_zoom_limits(cfg.canvas.min_zoom, cfg.canvas.max_zoom);
+        if let Some(cfg) = &config
+            && let Ok(configured) =
+                viewport.clone().try_with_zoom_limits(cfg.canvas.min_zoom, cfg.canvas.max_zoom)
+        {
+            viewport = configured;
         }
 
         #[cfg(feature = "lua")]
@@ -131,7 +135,7 @@ impl HeadlessSession {
         self.focus_stack.focused()
     }
 
-    pub fn preview_window_bounds(&self) -> Rect {
+    pub fn next_placement(&self) -> Rect {
         let existing = self.window_models.values().cloned().collect::<Vec<_>>();
         self.fallback_placement_policy
             .place_new_window(self.viewport(), &existing, None)
@@ -140,7 +144,7 @@ impl HeadlessSession {
 
     pub fn create_window(&mut self, bounds: Rect, properties: WindowProperties) -> WindowId {
         let id = WindowId(self.next_window_id);
-        self.next_window_id += 1;
+        self.next_window_id = self.next_window_id.wrapping_add(1);
 
         let window = Window::new(id, bounds).with_properties(properties);
         self.window_models.insert(id, window);
@@ -154,6 +158,9 @@ impl HeadlessSession {
     pub fn focus_window(&mut self, id: WindowId) -> bool {
         if self.window_models.contains_key(&id) {
             self.focus_stack.focus(id);
+            if let Some(window) = self.window_models.get_mut(&id) {
+                window.last_focused_at = Some(std::time::SystemTime::now());
+            }
             true
         } else {
             false
@@ -247,7 +254,9 @@ impl HeadlessSession {
                     let _ = self.close_window(id);
                 }
             }
-            Action::Spawn { .. } => {}
+            Action::Spawn { command } => {
+                eprintln!("spawn action ignored in headless mode: {command}");
+            }
             other => other.apply_to_viewport(self.viewport_mut()),
         }
     }
@@ -265,6 +274,8 @@ impl HeadlessSession {
         let focused = self.focus_stack.focused();
         let viewport = self.viewport();
         let logical_position = self.output_state.logical_position();
+        let output_name = self.output_state.name().to_string();
+        let visible_world = viewport.visible_world_rect();
 
         RuntimeStateSnapshot {
             focused_window_id: focused.map(|id| id.0),
@@ -273,7 +284,7 @@ impl HeadlessSession {
                 y: self.pointer_position.y,
             },
             outputs: vec![OutputSnapshot {
-                id: self.output_state.name().to_string(),
+                id: output_name.clone(),
                 logical_x: logical_position.x,
                 logical_y: logical_position.y,
                 viewport: ViewportSnapshot {
@@ -282,20 +293,41 @@ impl HeadlessSession {
                     zoom: viewport.zoom(),
                     screen_w: viewport.screen_size().w,
                     screen_h: viewport.screen_size().h,
-                    visible_world: viewport.visible_world_rect(),
+                    visible_world,
                 },
             }],
             windows: self
                 .window_models
                 .values()
-                .map(|window| WindowSnapshot {
-                    id: window.id.0,
-                    app_id: window.properties.app_id.clone(),
-                    title: window.properties.title.clone(),
-                    bounds: window.bounds,
-                    floating: window.floating,
-                    exclude_from_focus: window.exclude_from_focus,
-                    focused: focused == Some(window.id),
+                .map(|window| {
+                    let center_x = window.bounds.origin.x + window.bounds.size.w / 2.0;
+                    let center_y = window.bounds.origin.y + window.bounds.size.h / 2.0;
+                    let output_id = if center_x >= visible_world.origin.x
+                        && center_x < visible_world.origin.x + visible_world.size.w
+                        && center_y >= visible_world.origin.y
+                        && center_y < visible_world.origin.y + visible_world.size.h
+                    {
+                        Some(output_name.clone())
+                    } else {
+                        None
+                    };
+                    WindowSnapshot {
+                        id: window.id.0,
+                        app_id: window.properties.app_id.clone(),
+                        title: window.properties.title.clone(),
+                        bounds: window.bounds,
+                        floating: window.floating,
+                        exclude_from_focus: window.exclude_from_focus,
+                        focused: focused == Some(window.id),
+                        fullscreen: window.fullscreen,
+                        maximized: window.maximized,
+                        urgent: window.urgent,
+                        mapped: true,
+                        mapped_at: window.mapped_at.and_then(system_time_to_epoch_secs),
+                        last_focused_at: window.last_focused_at.and_then(system_time_to_epoch_secs),
+                        output_id,
+                        pid: window.properties.pid,
+                    }
                 })
                 .collect(),
         }
@@ -303,7 +335,7 @@ impl HeadlessSession {
 
     pub fn report(&self) -> HeadlessReport {
         let visible_world = self.viewport().visible_world_rect();
-        let preview_window_bounds = self.preview_window_bounds();
+        let next_placement = self.next_placement();
 
         HeadlessReport {
             config_loaded: self.config.is_some(),
@@ -318,7 +350,7 @@ impl HeadlessSession {
             #[cfg(not(feature = "lua"))]
             max_zoom: 8.0,
             visible_world,
-            preview_window_bounds,
+            next_placement,
             #[cfg(feature = "lua")]
             bindings: self.config.as_ref().map_or(0, |cfg| cfg.bindings.len()),
             #[cfg(not(feature = "lua"))]
@@ -350,10 +382,10 @@ impl std::fmt::Display for HeadlessReport {
             self.bindings,
             self.rules,
             self.autostart,
-            self.preview_window_bounds.origin.x,
-            self.preview_window_bounds.origin.y,
-            self.preview_window_bounds.size.w,
-            self.preview_window_bounds.size.h,
+            self.next_placement.origin.x,
+            self.next_placement.origin.y,
+            self.next_placement.size.w,
+            self.next_placement.size.h,
         )
     }
 }
@@ -370,6 +402,14 @@ impl ActionTarget for HeadlessSession {
 
     fn set_window_bounds(&mut self, id: WindowId, bounds: Rect) -> bool {
         Self::set_window_bounds(self, id, bounds)
+    }
+
+    fn begin_interactive_move(&mut self, _id: WindowId) -> bool {
+        false
+    }
+
+    fn begin_interactive_resize(&mut self, _id: WindowId, _edges: crate::window::ResizeEdges) -> bool {
+        false
     }
 
     fn focus_window(&mut self, id: WindowId) -> bool {
@@ -403,4 +443,13 @@ impl ActionTarget for HeadlessSession {
 
 pub fn run_headless(options: HeadlessOptions) -> HeadlessSession {
     HeadlessSession::new(options)
+}
+
+/// Convert a `SystemTime` to seconds since the Unix epoch as an `f64`.
+/// Returns `None` if the time predates the Unix epoch (pathological case).
+#[cfg(feature = "lua")]
+pub(crate) fn system_time_to_epoch_secs(t: SystemTime) -> Option<f64> {
+    t.duration_since(SystemTime::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs_f64())
 }

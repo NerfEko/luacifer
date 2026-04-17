@@ -7,6 +7,8 @@
 
 `evilwm` is an experimental Wayland compositor built around a shared infinite canvas: windows live in world coordinates, and outputs behave like cameras looking into that same world.
 
+It is **not** mainly meant as a polished mass-market desktop. The project is aimed much more directly at **developers who want to completely customize their own desktop UX in a simple scripting language**.
+
 ## The idea
 
 Most desktop environments make monitors or workspaces the primary containers that windows live inside. `evilwm` goes in a different direction:
@@ -25,6 +27,8 @@ In practice, that means Rust should own runtime truth, rendering, protocol handl
 
 The point is not just “a compositor with a config file.” The point is a small compositor kernel that can support very different window-management styles without needing a fork for every personality.
 
+More specifically, the project is trying to become a good foundation for developers who want to author their own focus rules, placement logic, movement behavior, overlays, automation, and overall desktop interaction model in Lua.
+
 ## Why it exists
 
 `evilwm` is an attempt to explore a desktop model that is:
@@ -32,6 +36,7 @@ The point is not just “a compositor with a config file.” The point is a smal
 - more spatial than workspace-driven
 - more composable than monolithic window managers
 - more scriptable in policy without giving up a strict runtime core
+- more useful to developers who want to build a personal environment instead of adapting to a fixed UX
 
 If it succeeds, the same core could support a freeform floating workflow, a Lua-authored tiler, a spatial canvas desktop, or hybrids that borrow from all three.
 
@@ -41,9 +46,21 @@ Today, the project is best read as:
 
 1. a compositor architecture experiment
 2. a growing policy/runtime testbed
-3. an early prototype, not a finished user product
+3. an early prototype for developer-authored desktop UX, not a finished mass-market product
 
 Active development is ongoing, and the real source of truth lives on Forgejo.
+
+## Who this is for
+
+`evilwm` is for people who are comfortable treating their desktop like software they can design.
+
+More specifically, it is for developers who want to:
+
+- define their own focus and placement rules
+- customize movement, resize, and keyboard behavior in Lua
+- mix floating, tiling, spatial-canvas, and automation ideas in one setup
+- iterate on UX logic without rewriting the compositor core in Rust
+- build a desktop that fits their own workflow instead of adapting to a fixed WM personality
 
 ## What the Lua layer is for
 
@@ -100,6 +117,8 @@ It is meant to be a readable baseline with practical keybindings, spawn commands
 ## Why this is the interesting part
 
 The real promise of this project is not just “Lua configuration.” It is that **a Lua config can completely change the kind of window manager this compositor feels like, without requiring a fork of the Rust core.**
+
+That matters most for developers who want to author their own UX rather than merely tweak somebody else's defaults.
 
 That means the same compositor kernel could eventually support very different personalities just by changing policy and helper modules.
 
