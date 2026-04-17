@@ -1,5 +1,4 @@
--- Public example config for the GitHub release mirror.
---
+-- Example test config
 -- This is meant to be a real, readable baseline that shows the intended
 -- direction of the Lua policy layer: keybindings, placement, focus behavior,
 -- movement, resize handling, and compositor-side visuals in one file.
