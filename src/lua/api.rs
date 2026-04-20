@@ -1,4 +1,7 @@
-use crate::{canvas::Rect, window::{ResizeEdges, WindowId}};
+use crate::{
+    canvas::Rect,
+    window::{ResizeEdges, WindowId},
+};
 use mlua::{Lua, Table, Value};
 
 use super::ConfigError;
@@ -28,7 +31,8 @@ pub struct WindowSnapshot {
     pub maximized: bool,
     /// Whether this window has an urgency hint set.
     pub urgent: bool,
-    /// Always `true` for windows in the active snapshot (only mapped windows are included).
+    /// Always `true` for windows in the active snapshot (only mapped windows appear).
+    /// Present for lifecycle completeness; do not use as a meaningful filter.
     pub mapped: bool,
     /// Unix epoch seconds at which this window was first mapped. Provisional.
     pub mapped_at: Option<f64>,
@@ -42,6 +46,10 @@ pub struct WindowSnapshot {
     pub pid: Option<u32>,
 }
 
+/// A point-in-time viewport snapshot, passed to Lua hooks and query helpers.
+///
+/// `x` and `y` represent the viewport's world-space origin. `world_x` and `world_y` are
+/// explicit aliases available in Lua for the same values.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ViewportSnapshot {
     pub x: f64,
@@ -52,6 +60,10 @@ pub struct ViewportSnapshot {
     pub visible_world: Rect,
 }
 
+/// A point-in-time output snapshot, passed to Lua hooks and query helpers.
+///
+/// `logical_x` / `logical_y` are raw scalars kept for compatibility. Prefer the structured
+/// `logical_bounds` rect `{x, y, w, h}` in Lua.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OutputSnapshot {
     pub id: String,
@@ -134,6 +146,9 @@ pub enum HookAction {
     ClearFocus,
     CloseWindow {
         id: u64,
+    },
+    Spawn {
+        command: String,
     },
     PanCanvas {
         dx: f64,
@@ -233,6 +248,9 @@ impl HookAction {
             "clear_focus" => Ok(Self::ClearFocus),
             "close_window" => Ok(Self::CloseWindow {
                 id: table.get::<u64>("id")?,
+            }),
+            "spawn" => Ok(Self::Spawn {
+                command: table.get::<String>("command")?,
             }),
             "pan_canvas" => Ok(Self::PanCanvas {
                 dx: table.get::<f64>("dx")?,
@@ -350,11 +368,15 @@ pub trait ActionTarget {
     fn focus_window(&mut self, id: WindowId) -> bool;
     fn clear_focus(&mut self) -> bool;
     fn close_window(&mut self, id: WindowId) -> bool;
+    fn spawn_command(&mut self, command: &str) -> bool;
     fn pan_canvas(&mut self, dx: f64, dy: f64);
     fn zoom_canvas(&mut self, factor: f64) -> Result<(), ConfigError>;
 }
 
-pub fn apply_hook_action<T: ActionTarget>(target: &mut T, action: HookAction) -> Result<(), ConfigError> {
+pub fn apply_hook_action<T: ActionTarget>(
+    target: &mut T,
+    action: HookAction,
+) -> Result<(), ConfigError> {
     match action {
         HookAction::MoveWindow { id, x, y } => {
             let id = WindowId(id);
@@ -437,6 +459,15 @@ pub fn apply_hook_action<T: ActionTarget>(target: &mut T, action: HookAction) ->
                 )))
             }
         }
+        HookAction::Spawn { command } => {
+            if target.spawn_command(&command) {
+                Ok(())
+            } else {
+                Err(ConfigError::Validation(
+                    "hook action spawn requires a non-empty command".into(),
+                ))
+            }
+        }
         HookAction::PanCanvas { dx, dy } => {
             target.pan_canvas(dx, dy);
             Ok(())
@@ -462,5 +493,29 @@ pub fn parse_hook_actions(value: Value) -> Result<Vec<HookAction>, ConfigError> 
         _ => Err(ConfigError::Validation(
             "hook must return nil, an action table, or { actions = { ... } }".into(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mlua::Lua;
+
+    #[test]
+    fn parse_hook_actions_accepts_spawn_action() {
+        let lua = Lua::new();
+        let table = lua.create_table().expect("table");
+        table.set("kind", "spawn").expect("kind");
+        table
+            .set("command", "./scripts/example-launch.sh terminal")
+            .expect("command");
+
+        let actions = parse_hook_actions(Value::Table(table)).expect("parse actions");
+        assert_eq!(
+            actions,
+            vec![HookAction::Spawn {
+                command: "./scripts/example-launch.sh terminal".into(),
+            }]
+        );
     }
 }

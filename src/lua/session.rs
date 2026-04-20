@@ -14,7 +14,9 @@ use crate::{
     input::{ModifierSet, parse_keyspec},
     lua::{
         ConfigError, HookAction, PropertyValue, RuntimeStateSnapshot, WindowSnapshot,
-        api::ActionTarget, apply_hook_action, register_draw_api,
+        api::ActionTarget,
+        apply_hook_action,
+        config::register_root_include,
         hook_support::{
             ResolveFocusContext, delta_hook_context, find_output_snapshot,
             find_output_snapshot_at_point, find_primary_output_snapshot, find_window_snapshot,
@@ -22,7 +24,7 @@ use crate::{
             output_to_table, property_changed_hook_context, rect_to_table, snapshot_to_table,
             window_hook_context, window_to_table,
         },
-        parse_hook_actions,
+        parse_hook_actions, register_draw_api,
     },
     window::{ResizeEdges, WindowId},
 };
@@ -30,7 +32,6 @@ use crate::{
 #[derive(Debug)]
 pub struct LuaSession {
     lua: Lua,
-    _base_dir: PathBuf,
     session: Rc<RefCell<HeadlessSession>>,
 }
 
@@ -42,13 +43,10 @@ impl LuaSession {
         let lua = Lua::new();
         let base_dir = base_dir.into();
 
+        register_root_include(&lua, base_dir)?;
         register_runtime_api(&lua, session.clone())?;
 
-        Ok(Self {
-            lua,
-            _base_dir: base_dir,
-            session,
-        })
+        Ok(Self { lua, session })
     }
 
     pub fn eval(&self, source: &str, name: impl AsRef<Path>) -> Result<Value, ConfigError> {
@@ -110,19 +108,19 @@ impl LuaSession {
         self.call_hook(
             "window_property_changed",
             property_changed_hook_context(
-                &self.lua,
-                &state,
-                &window,
-                property,
-                old_value,
-                new_value,
+                &self.lua, &state, &window, property, old_value, new_value,
             )?,
         )
     }
 
-    pub fn trigger_resolve_focus(&self, request: ResolveFocusRequest<'_>) -> Result<bool, ConfigError> {
+    pub fn trigger_resolve_focus(
+        &self,
+        request: ResolveFocusRequest<'_>,
+    ) -> Result<bool, ConfigError> {
         let state = self.session.borrow().state_snapshot();
-        let previous_window = request.previous.and_then(|id| find_window_snapshot(&state, id));
+        let previous_window = request
+            .previous
+            .and_then(|id| find_window_snapshot(&state, id));
         self.call_hook(
             "resolve_focus",
             focus_resolve_context(
@@ -460,9 +458,8 @@ fn register_runtime_api(
     window_table.set("focus", focus)?;
 
     let clear_focus_session = session.clone();
-    let clear_focus = lua.create_function(move |_, ()| {
-        Ok(clear_focus_session.borrow_mut().clear_focus())
-    })?;
+    let clear_focus =
+        lua.create_function(move |_, ()| Ok(clear_focus_session.borrow_mut().clear_focus()))?;
     window_table.set("clear_focus", clear_focus)?;
 
     let move_session = session.clone();
@@ -532,6 +529,8 @@ fn register_runtime_api(
         let table = lua.create_table()?;
         table.set("x", output.viewport.x)?;
         table.set("y", output.viewport.y)?;
+        table.set("world_x", output.viewport.x)?;
+        table.set("world_y", output.viewport.y)?;
         table.set("zoom", output.viewport.zoom)?;
         table.set("screen_w", output.viewport.screen_w)?;
         table.set("screen_h", output.viewport.screen_h)?;

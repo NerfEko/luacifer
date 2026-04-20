@@ -96,31 +96,33 @@ pub fn run_winit(options: RuntimeOptions) -> Result<(), Box<dyn std::error::Erro
                         &output,
                         "draw_background",
                     ));
+                    let mut window_overlay_elements = Some(solid_elements_from_draw_commands(
+                        state,
+                        &output,
+                        "draw_window_overlay",
+                    ));
                     let mut overlay_elements = Some({
                         let mut elements =
                             solid_elements_from_draw_commands(state, &output, "draw_overlay");
                         elements.extend(lock_overlay_elements(state, &output));
                         elements
                     });
-                    let mut space_elements = Some(
-                        match smithay::desktop::space::space_render_elements(
-                            renderer,
-                            [&state.space],
-                            &output,
-                            1.0,
-                        ) {
-                            Ok(elements) => elements,
-                            Err(error) => {
-                                eprintln!("winit render element generation failed: {error}");
-                                state.request_redraw();
-                                return;
-                            }
-                        },
-                    );
+                    let space_split = match build_winit_space_elements(state, renderer, &output) {
+                        Ok(elements) => elements,
+                        Err(error) => {
+                            eprintln!("winit render element generation failed: {error}");
+                            state.request_redraw();
+                            return;
+                        }
+                    };
+                    let mut window_elements = Some(space_split.windows);
+                    let mut popup_elements = Some(space_split.popups);
 
                     let mut elements = Vec::<LiveRenderElements<GlesRenderer, _>>::with_capacity(
                         background_elements.as_ref().map_or(0, Vec::len)
-                            + space_elements.as_ref().map_or(0, Vec::len)
+                            + window_elements.as_ref().map_or(0, Vec::len)
+                            + window_overlay_elements.as_ref().map_or(0, Vec::len)
+                            + popup_elements.as_ref().map_or(0, Vec::len)
                             + overlay_elements.as_ref().map_or(0, Vec::len),
                     );
                     // Lua config stores the stack bottom-to-top, but Smithay consumes render
@@ -135,7 +137,21 @@ pub fn run_winit(options: RuntimeOptions) -> Result<(), Box<dyn std::error::Erro
                                     .map(LiveRenderElements::Custom),
                             ),
                             DrawLayer::Windows => elements.extend(
-                                space_elements
+                                window_elements
+                                    .take()
+                                    .into_iter()
+                                    .flatten()
+                                    .map(LiveRenderElements::Space),
+                            ),
+                            DrawLayer::WindowOverlay => elements.extend(
+                                window_overlay_elements
+                                    .take()
+                                    .into_iter()
+                                    .flatten()
+                                    .map(LiveRenderElements::Custom),
+                            ),
+                            DrawLayer::Popups => elements.extend(
+                                popup_elements
                                     .take()
                                     .into_iter()
                                     .flatten()
@@ -157,7 +173,7 @@ pub fn run_winit(options: RuntimeOptions) -> Result<(), Box<dyn std::error::Erro
                         &mut framebuffer,
                         0,
                         &elements,
-                        [0.08, 0.05, 0.12, 1.0],
+                        state.draw_clear_color(),
                     ) {
                         eprintln!("winit damage render failed: {error}");
                         state.request_redraw();
@@ -175,30 +191,38 @@ pub fn run_winit(options: RuntimeOptions) -> Result<(), Box<dyn std::error::Erro
                         ) {
                             Ok(mapping) => match renderer.map_texture(&mapping) {
                                 Ok(bytes) => {
-                                    if let Err(error) =
-                                        write_ppm_screenshot(&path, size, bytes, mapping.flipped())
-                                    {
-                                        eprintln!(
-                                            "failed to write screenshot {}: {error}",
-                                            path.display()
-                                        );
-                                        state.emit_event(
-                                            "screenshot_failed",
-                                            serde_json::json!({
-                                                "path": path.display().to_string(),
-                                                "error": error.to_string(),
-                                            }),
-                                        );
-                                    } else {
-                                        println!("wrote screenshot to {}", path.display());
-                                        state.emit_event(
-                                            "screenshot_written",
-                                            serde_json::json!({
-                                                "path": path.display().to_string(),
-                                                "width": size.w,
-                                                "height": size.h,
-                                            }),
-                                        );
+                                    match write_ppm_screenshot(
+                                        &path,
+                                        size,
+                                        bytes,
+                                        mapping.flipped(),
+                                    ) {
+                                        Err(error) => {
+                                            eprintln!(
+                                                "failed to write screenshot {}: {error}",
+                                                path.display()
+                                            );
+                                            state.emit_event(
+                                                "screenshot_failed",
+                                                serde_json::json!({
+                                                    "path": path.display().to_string(),
+                                                    "error": error.to_string(),
+                                                }),
+                                            );
+                                        }
+                                        Ok(bytes_written) => {
+                                            println!("wrote screenshot to {}", path.display());
+                                            state.emit_event(
+                                                "screenshot_written",
+                                                serde_json::json!({
+                                                    "path": path.display().to_string(),
+                                                    "format": "ppm",
+                                                    "width": size.w,
+                                                    "height": size.h,
+                                                    "bytes_written": bytes_written,
+                                                }),
+                                            );
+                                        }
                                     }
                                 }
                                 Err(error) => {

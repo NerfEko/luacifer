@@ -14,7 +14,11 @@ impl EvilWm {
     }
 
     #[cfg(feature = "xwayland")]
-    fn sync_x11_window_geometry(&mut self, surface: &X11Surface, geometry: Rectangle<i32, Logical>) {
+    fn sync_x11_window_geometry(
+        &mut self,
+        surface: &X11Surface,
+        geometry: Rectangle<i32, Logical>,
+    ) {
         if let Some(space_window) = self.find_space_x11_window(surface) {
             self.space.map_element(space_window, geometry.loc, false);
         }
@@ -24,7 +28,8 @@ impl EvilWm {
             && let Some(window) = self.window_models.get_mut(&id)
         {
             window.bounds.origin = Point::new(geometry.loc.x as f64, geometry.loc.y as f64);
-            window.bounds.size = Size::new(geometry.size.w.max(1) as f64, geometry.size.h.max(1) as f64);
+            window.bounds.size =
+                Size::new(geometry.size.w.max(1) as f64, geometry.size.h.max(1) as f64);
         }
     }
 
@@ -43,7 +48,10 @@ impl EvilWm {
         let previous_focus = self.focus_stack.focused();
         let bounds = if let Some(space_window) = self.find_space_x11_window(surface) {
             let geometry = space_window.geometry();
-            let location = self.space.element_location(&space_window).unwrap_or_default();
+            let location = self
+                .space
+                .element_location(&space_window)
+                .unwrap_or_default();
             Rect::new(
                 location.x as f64,
                 location.y as f64,

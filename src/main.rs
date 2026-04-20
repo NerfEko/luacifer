@@ -20,7 +20,6 @@ use evilwm::lua::LuaRuntime;
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
 enum Backend {
-    X11,
     Winit,
     Udev,
     Headless,
@@ -38,7 +37,6 @@ enum IpcCommand {
 impl Backend {
     fn from_config_name(name: &str) -> Option<Self> {
         match name {
-            "x11" => Some(Self::X11),
             "winit" => Some(Self::Winit),
             "udev" => Some(Self::Udev),
             "headless" => Some(Self::Headless),
@@ -280,14 +278,9 @@ fn run_mode(cli: Cli) {
                 println!("{}", session.report());
             }
         }
-        Backend::Winit | Backend::X11 => {
+        Backend::Winit => {
             #[cfg(any(feature = "winit", feature = "x11", feature = "udev"))]
             {
-                if matches!(backend, Backend::X11) {
-                    eprintln!(
-                        "x11 backend is not implemented yet; starting the nested winit backend instead"
-                    );
-                }
                 let options = RuntimeOptions {
                     command: cli.command,
                     config_path,

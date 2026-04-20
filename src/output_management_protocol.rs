@@ -20,6 +20,7 @@ use zwlr_output_mode_v1::ZwlrOutputModeV1;
 const VERSION: u32 = 4;
 
 /// Snapshot of one output's current state.
+#[derive(Debug, Clone, PartialEq)]
 pub struct OutputHeadState {
     pub name: String,
     pub description: String,
@@ -34,6 +35,7 @@ pub struct OutputHeadState {
     pub scale: f64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
 pub struct ModeInfo {
     pub width: i32,
     pub height: i32,
@@ -73,6 +75,52 @@ pub enum ConfigHeadData {
 pub struct ModeData {
     pub output_name: String,
     pub mode_index: usize,
+}
+
+/// Validate whether all requested head configs are within the currently supported scope.
+///
+/// Currently supported:
+/// - enabled heads with position changes
+/// - disabled heads (output disable request)
+///
+/// Not yet supported: mode, custom_mode, transform, scale changes.
+fn validate_requested_configs(
+    heads: HashMap<String, RequestedHeadConfig>,
+) -> Result<Vec<RequestedHeadConfig>, &'static str> {
+    for cfg in heads.values() {
+        if cfg.mode_index.is_some() {
+            return Err("set_mode is not yet supported");
+        }
+        if cfg.custom_mode.is_some() {
+            return Err("set_custom_mode is not yet supported");
+        }
+        if cfg.transform.is_some() {
+            return Err("set_transform is not yet supported");
+        }
+        if cfg.scale.is_some() {
+            return Err("set_scale is not yet supported");
+        }
+    }
+    Ok(heads.into_values().collect())
+}
+
+/// Try to extract and validate the pending configuration from a ConfigState.
+///
+/// Returns `None` if the configuration was already used (posts a protocol error).
+/// Returns `Some(Err(reason))` if validation fails.
+/// Returns `Some(Ok(configs))` if validation passes.
+fn extract_and_validate_config(
+    new_config: &mut ConfigState,
+    conf: &ZwlrOutputConfigurationV1,
+) -> Option<Result<Vec<RequestedHeadConfig>, &'static str>> {
+    let ConfigState::Ongoing(heads) = mem::replace(new_config, ConfigState::Finished) else {
+        conf.post_error(
+            zwlr_output_configuration_v1::Error::AlreadyUsed,
+            "configuration had already been used",
+        );
+        return None;
+    };
+    Some(validate_requested_configs(heads))
 }
 
 pub struct OutputManagementState {
@@ -116,6 +164,16 @@ impl OutputManagementState {
             current_state: HashMap::new(),
         }
     }
+
+    #[cfg(test)]
+    pub fn current_state_for_tests(&self) -> &HashMap<String, OutputHeadState> {
+        &self.current_state
+    }
+
+    #[cfg(test)]
+    pub fn serial_for_tests(&self) -> u32 {
+        self.serial
+    }
 }
 
 /// Send updated output state to all clients. Takes split references.
@@ -127,6 +185,10 @@ pub fn notify_changes<D>(
     D: Dispatch<ZwlrOutputModeV1, ModeData>,
     D: 'static,
 {
+    if om.current_state == new_state {
+        return;
+    }
+
     // Destroy all old heads
     for client_data in om.clients.values_mut() {
         for (_name, (head, modes)) in client_data.heads.drain() {
@@ -342,7 +404,7 @@ where
                     c.manager.finished();
                 }
             }
-            _ => {},
+            _ => {}
         }
     }
 
@@ -471,29 +533,18 @@ where
                     conf.failed();
                     return;
                 };
-                let ConfigState::Ongoing(heads) = mem::replace(new_config, ConfigState::Finished)
-                else {
-                    conf.post_error(
-                        zwlr_output_configuration_v1::Error::AlreadyUsed,
-                        "configuration had already been used",
-                    );
+                let Some(validated) = extract_and_validate_config(new_config, conf) else {
                     return;
                 };
-
-                // Reject disable or mode changes (out of scope)
-                let has_unsupported = heads.values().any(|cfg| {
-                    !cfg.enabled || cfg.mode_index.is_some() || cfg.custom_mode.is_some()
-                });
-                if has_unsupported {
-                    conf.failed();
-                    return;
-                }
-
-                let configs: Vec<RequestedHeadConfig> = heads.into_values().collect();
-                if state.apply_output_config(configs) {
-                    conf.succeeded();
-                } else {
-                    conf.failed();
+                match validated {
+                    Err(_reason) => conf.failed(),
+                    Ok(configs) => {
+                        if state.apply_output_config(configs) {
+                            conf.succeeded();
+                        } else {
+                            conf.failed();
+                        }
+                    }
                 }
             }
             zwlr_output_configuration_v1::Request::Test => {
@@ -505,22 +556,12 @@ where
                     conf.failed();
                     return;
                 };
-                let ConfigState::Ongoing(heads) = mem::replace(new_config, ConfigState::Finished)
-                else {
-                    conf.post_error(
-                        zwlr_output_configuration_v1::Error::AlreadyUsed,
-                        "configuration had already been used",
-                    );
+                let Some(validated) = extract_and_validate_config(new_config, conf) else {
                     return;
                 };
-
-                let has_unsupported = heads.values().any(|cfg| {
-                    !cfg.enabled || cfg.mode_index.is_some() || cfg.custom_mode.is_some()
-                });
-                if has_unsupported {
-                    conf.failed();
-                } else {
-                    conf.succeeded();
+                match validated {
+                    Err(_reason) => conf.failed(),
+                    Ok(_configs) => conf.succeeded(),
                 }
             }
             zwlr_output_configuration_v1::Request::Destroy => {
@@ -529,7 +570,7 @@ where
                     .get_mut(&client.id())
                     .map(|d| d.confs.remove(conf));
             }
-            _ => {},
+            _ => {}
         }
     }
 }
@@ -689,4 +730,198 @@ macro_rules! delegate_output_management {
             smithay::reexports::wayland_protocols_wlr::output_management::v1::server::zwlr_output_mode_v1::ZwlrOutputModeV1: $crate::output_management_protocol::ModeData
         ] => $crate::output_management_protocol::OutputManagementState);
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smithay::reexports::wayland_server::Display;
+
+    struct TestState;
+
+    impl OutputManagementHandler for TestState {
+        fn output_management_state(&mut self) -> &mut OutputManagementState {
+            unreachable!("not used in notify_changes tests")
+        }
+
+        fn apply_output_config(&mut self, _configs: Vec<RequestedHeadConfig>) -> bool {
+            false
+        }
+    }
+
+    impl GlobalDispatch<ZwlrOutputManagerV1, OutputManagementGlobalData, TestState> for TestState {
+        fn bind(
+            _state: &mut TestState,
+            _handle: &DisplayHandle,
+            _client: &Client,
+            _resource: New<ZwlrOutputManagerV1>,
+            _global_data: &OutputManagementGlobalData,
+            _data_init: &mut DataInit<'_, TestState>,
+        ) {
+        }
+    }
+
+    impl Dispatch<ZwlrOutputManagerV1, (), TestState> for TestState {
+        fn request(
+            _state: &mut TestState,
+            _client: &Client,
+            _resource: &ZwlrOutputManagerV1,
+            _request: zwlr_output_manager_v1::Request,
+            _data: &(),
+            _dh: &DisplayHandle,
+            _data_init: &mut DataInit<'_, TestState>,
+        ) {
+        }
+    }
+
+    impl Dispatch<ZwlrOutputHeadV1, String, TestState> for TestState {
+        fn request(
+            _state: &mut TestState,
+            _client: &Client,
+            _resource: &ZwlrOutputHeadV1,
+            _request: zwlr_output_head_v1::Request,
+            _data: &String,
+            _dh: &DisplayHandle,
+            _data_init: &mut DataInit<'_, TestState>,
+        ) {
+        }
+    }
+
+    impl Dispatch<ZwlrOutputConfigurationV1, u32, TestState> for TestState {
+        fn request(
+            _state: &mut TestState,
+            _client: &Client,
+            _resource: &ZwlrOutputConfigurationV1,
+            _request: zwlr_output_configuration_v1::Request,
+            _data: &u32,
+            _dh: &DisplayHandle,
+            _data_init: &mut DataInit<'_, TestState>,
+        ) {
+        }
+    }
+
+    impl Dispatch<ZwlrOutputConfigurationHeadV1, ConfigHeadData, TestState> for TestState {
+        fn request(
+            _state: &mut TestState,
+            _client: &Client,
+            _resource: &ZwlrOutputConfigurationHeadV1,
+            _request: zwlr_output_configuration_head_v1::Request,
+            _data: &ConfigHeadData,
+            _dh: &DisplayHandle,
+            _data_init: &mut DataInit<'_, TestState>,
+        ) {
+        }
+    }
+
+    impl Dispatch<ZwlrOutputModeV1, ModeData, TestState> for TestState {
+        fn request(
+            _state: &mut TestState,
+            _client: &Client,
+            _resource: &ZwlrOutputModeV1,
+            _request: zwlr_output_mode_v1::Request,
+            _data: &ModeData,
+            _dh: &DisplayHandle,
+            _data_init: &mut DataInit<'_, TestState>,
+        ) {
+        }
+    }
+
+    fn sample_head() -> OutputHeadState {
+        OutputHeadState {
+            name: "evilwm".into(),
+            description: "evilwm test output".into(),
+            make: "evilwm".into(),
+            model: "test".into(),
+            serial_number: String::new(),
+            physical_size: (0, 0),
+            modes: vec![ModeInfo {
+                width: 1280,
+                height: 720,
+                refresh: 60_000,
+                preferred: true,
+            }],
+            current_mode_index: Some(0),
+            position: (0, 0),
+            transform: Transform::Normal,
+            scale: 1.0,
+        }
+    }
+
+    fn requested_head(output_name: &str) -> RequestedHeadConfig {
+        RequestedHeadConfig {
+            output_name: output_name.into(),
+            enabled: true,
+            mode_index: None,
+            custom_mode: None,
+            position: None,
+            transform: None,
+            scale: None,
+        }
+    }
+
+    #[test]
+    fn validate_requested_configs_accepts_disable_requests() {
+        let mut heads = HashMap::new();
+        let mut disabled = requested_head("evilwm");
+        disabled.enabled = false;
+        heads.insert(String::from("evilwm"), disabled);
+
+        let validated = validate_requested_configs(heads).expect("disable request should validate");
+        assert_eq!(validated.len(), 1);
+        assert!(!validated[0].enabled);
+    }
+
+    #[test]
+    fn validate_requested_configs_still_rejects_mode_transform_and_scale_changes() {
+        let cases = [
+            {
+                let mut cfg = requested_head("mode");
+                cfg.mode_index = Some(0);
+                (cfg, "set_mode is not yet supported")
+            },
+            {
+                let mut cfg = requested_head("custom-mode");
+                cfg.custom_mode = Some((1280, 720, 60_000));
+                (cfg, "set_custom_mode is not yet supported")
+            },
+            {
+                let mut cfg = requested_head("transform");
+                cfg.transform = Some(Transform::Flipped180);
+                (cfg, "set_transform is not yet supported")
+            },
+            {
+                let mut cfg = requested_head("scale");
+                cfg.scale = Some(1.5);
+                (cfg, "set_scale is not yet supported")
+            },
+        ];
+
+        for (cfg, expected) in cases {
+            let mut heads = HashMap::new();
+            heads.insert(cfg.output_name.clone(), cfg);
+            match validate_requested_configs(heads) {
+                Ok(_) => panic!("config should be rejected"),
+                Err(error) => assert_eq!(error, expected),
+            }
+        }
+    }
+
+    #[test]
+    fn notify_changes_skips_noop_state_updates() {
+        let display: Display<TestState> = Display::new().expect("display");
+        let mut om = OutputManagementState {
+            display: display.handle(),
+            serial: 0,
+            clients: HashMap::new(),
+            current_state: HashMap::new(),
+        };
+
+        let initial = HashMap::from([(String::from("evilwm"), sample_head())]);
+        notify_changes::<TestState>(&mut om, initial.clone());
+        assert_eq!(om.serial_for_tests(), 1);
+        assert_eq!(om.current_state_for_tests(), &initial);
+
+        notify_changes::<TestState>(&mut om, initial);
+        assert_eq!(om.serial_for_tests(), 1);
+    }
 }

@@ -10,6 +10,9 @@ pub enum Action {
     ZoomOut { factor: f64 },
     CloseWindow,
     Spawn { command: String },
+    FocusNext,
+    FocusPrev,
+    Quit,
 }
 
 impl Action {
@@ -23,6 +26,9 @@ impl Action {
             Self::ZoomOut { .. } => "zoom_out",
             Self::CloseWindow => "close_window",
             Self::Spawn { .. } => "spawn",
+            Self::FocusNext => "focus_next",
+            Self::FocusPrev => "focus_prev",
+            Self::Quit => "quit",
         }
     }
 
@@ -56,6 +62,9 @@ impl Action {
             "spawn" => Some(Self::Spawn {
                 command: command?.to_string(),
             }),
+            "focus_next" => Some(Self::FocusNext),
+            "focus_prev" => Some(Self::FocusPrev),
+            "quit" => Some(Self::Quit),
             _ => None,
         }
     }
@@ -68,7 +77,11 @@ impl Action {
             Self::PanDown { amount } => viewport.pan_world(Vec2::new(0.0, amount)),
             Self::ZoomIn { factor } => viewport.zoom_at_screen(screen_center(viewport), factor),
             Self::ZoomOut { factor } => viewport.zoom_at_screen(screen_center(viewport), factor),
-            Self::CloseWindow | Self::Spawn { .. } => {}
+            Self::CloseWindow
+            | Self::Spawn { .. }
+            | Self::FocusNext
+            | Self::FocusPrev
+            | Self::Quit => {}
         }
     }
 }

@@ -53,7 +53,11 @@ impl EvilWm {
         self.trackpad_pinch_scale = Some(1.0);
     }
 
-    pub(crate) fn apply_trackpad_pinch(&mut self, delta: SmithayPoint<f64, Logical>, absolute_scale: f64) {
+    pub(crate) fn apply_trackpad_pinch(
+        &mut self,
+        delta: SmithayPoint<f64, Logical>,
+        absolute_scale: f64,
+    ) {
         self.apply_trackpad_swipe(delta);
 
         if let Some(relative) =
@@ -148,7 +152,7 @@ impl EvilWm {
                             let key = crate::input::bindings::normalize_key(&key);
                             let modifier_set = modifier_set_from(modifiers);
                             #[cfg(feature = "udev")]
-                            if let Some(control) = default_tty_control_action(&key, modifier_set)
+                            if let Some(control) = state.tty_control_action(&key, modifier_set)
                                 && let Some(callback) = state.tty_control.clone()
                             {
                                 let control_name = match control {
@@ -277,7 +281,11 @@ impl EvilWm {
                 }
 
                 let mut suppress_press = false;
-                if ButtonState::Pressed == button_state && !pointer.is_grabbed() && button == 274 {
+                if ButtonState::Pressed == button_state
+                    && !pointer.is_grabbed()
+                    && button == 274
+                    && self.canvas_allows_middle_click_pan()
+                {
                     self.active_interactive_op = Some(ActiveInteractiveOp::new(
                         ActiveInteractiveKind::PanCanvas,
                         WindowId(0),
@@ -295,6 +303,16 @@ impl EvilWm {
                     let had_interactive_before = self.active_interactive_op.is_some();
                     let modifier_resize_click =
                         hovered_window.is_some() && modifiers.logo && button != 272;
+                    let resolve_focus_hook_installed = {
+                        #[cfg(feature = "lua")]
+                        {
+                            self.live_hook_exists("resolve_focus")
+                        }
+                        #[cfg(not(feature = "lua"))]
+                        {
+                            false
+                        }
+                    };
 
                     let handled = self.try_live_resolve_focus(ResolveFocusRequest {
                         reason: "pointer_button",
@@ -313,7 +331,7 @@ impl EvilWm {
                     if suppress_press {
                         self.suppress_pointer_button_release = Some(button);
                     }
-                    if !handled {
+                    if should_apply_pointer_focus_fallback(handled, resolve_focus_hook_installed) {
                         if let Some(window) = hovered_window {
                             let _ = self.focus_window(WindowId(window.id));
                         } else {
@@ -389,17 +407,17 @@ impl EvilWm {
                 const V120_UNITS_PER_NOTCH: f64 = 120.0;
 
                 let horizontal_amount = event.amount(Axis::Horizontal).unwrap_or_else(|| {
-                    event.amount_v120(Axis::Horizontal).unwrap_or(0.0)
-                        * SCROLL_PIXELS_PER_NOTCH / V120_UNITS_PER_NOTCH
+                    event.amount_v120(Axis::Horizontal).unwrap_or(0.0) * SCROLL_PIXELS_PER_NOTCH
+                        / V120_UNITS_PER_NOTCH
                 });
                 let vertical_amount = event.amount(Axis::Vertical).unwrap_or_else(|| {
-                    event.amount_v120(Axis::Vertical).unwrap_or(0.0)
-                        * SCROLL_PIXELS_PER_NOTCH / V120_UNITS_PER_NOTCH
+                    event.amount_v120(Axis::Vertical).unwrap_or(0.0) * SCROLL_PIXELS_PER_NOTCH
+                        / V120_UNITS_PER_NOTCH
                 });
                 let horizontal_amount_discrete = event.amount_v120(Axis::Horizontal);
                 let vertical_amount_discrete = event.amount_v120(Axis::Vertical);
 
-                if self.current_modifier_set().logo {
+                if self.current_modifier_set().logo && self.canvas_allows_pointer_zoom() {
                     let zoom_delta = vertical_amount_discrete.unwrap_or(vertical_amount);
                     if zoom_delta != 0.0 {
                         let zoom_step =
@@ -466,7 +484,9 @@ impl EvilWm {
                     return;
                 }
                 let delta = event.delta();
-                self.apply_trackpad_swipe(delta);
+                if self.canvas_allows_gesture_navigation() {
+                    self.apply_trackpad_swipe(delta);
+                }
                 self.emit_event(
                     "gesture",
                     serde_json::json!({
@@ -492,7 +512,9 @@ impl EvilWm {
                 if self.session_locked {
                     return;
                 }
-                self.begin_trackpad_pinch();
+                if self.canvas_allows_gesture_navigation() {
+                    self.begin_trackpad_pinch();
+                }
                 self.emit_event(
                     "gesture",
                     serde_json::json!({
@@ -513,7 +535,9 @@ impl EvilWm {
                     return;
                 }
                 let delta = event.delta();
-                self.apply_trackpad_pinch(delta, event.scale());
+                if self.canvas_allows_gesture_navigation() {
+                    self.apply_trackpad_pinch(delta, event.scale());
+                }
                 self.emit_event(
                     "gesture",
                     serde_json::json!({
@@ -533,7 +557,9 @@ impl EvilWm {
                 if self.session_locked {
                     return;
                 }
-                self.end_trackpad_pinch();
+                if self.canvas_allows_gesture_navigation() {
+                    self.end_trackpad_pinch();
+                }
                 self.emit_event("gesture", serde_json::json!({ "kind": "pinch_end" }));
                 self.trigger_live_gesture("pinch_end", 0, crate::canvas::Vec2::new(0.0, 0.0), None);
             }
@@ -560,6 +586,13 @@ pub(super) fn pinch_relative_factor(
     Some(clamped_scale / previous.max(0.0001))
 }
 
+fn should_apply_pointer_focus_fallback(
+    resolve_focus_handled: bool,
+    resolve_focus_hook_installed: bool,
+) -> bool {
+    !resolve_focus_handled && !resolve_focus_hook_installed
+}
+
 fn modifier_set_json(modifiers: ModifierSet) -> serde_json::Value {
     serde_json::json!({
         "ctrl": modifiers.ctrl,
@@ -575,5 +608,18 @@ fn modifier_set_from(modifiers: &ModifiersState) -> ModifierSet {
         alt: modifiers.alt,
         shift: modifiers.shift,
         logo: modifiers.logo,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_apply_pointer_focus_fallback;
+
+    #[test]
+    fn pointer_focus_fallback_only_runs_without_resolve_focus_hook() {
+        assert!(should_apply_pointer_focus_fallback(false, false));
+        assert!(!should_apply_pointer_focus_fallback(true, false));
+        assert!(!should_apply_pointer_focus_fallback(false, true));
+        assert!(!should_apply_pointer_focus_fallback(true, true));
     }
 }

@@ -84,11 +84,30 @@ impl HeadlessSession {
         let viewport = Viewport::new(screen_size);
         #[cfg(feature = "lua")]
         if let Some(cfg) = &config
-            && let Ok(configured) =
-                viewport.clone().try_with_zoom_limits(cfg.canvas.min_zoom, cfg.canvas.max_zoom)
+            && let Ok(configured) = viewport
+                .clone()
+                .try_with_zoom_limits(cfg.canvas.min_zoom, cfg.canvas.max_zoom)
         {
             viewport = configured;
         }
+
+        #[cfg(feature = "lua")]
+        let fallback_placement_policy =
+            config
+                .as_ref()
+                .map_or_else(PlacementPolicy::default, |cfg| PlacementPolicy {
+                    default_size: Size::new(
+                        cfg.placement.default_size.0,
+                        cfg.placement.default_size.1,
+                    ),
+                    padding: cfg.placement.padding,
+                    cascade_step: crate::canvas::Vec2::new(
+                        cfg.placement.cascade_step.0,
+                        cfg.placement.cascade_step.1,
+                    ),
+                });
+        #[cfg(not(feature = "lua"))]
+        let fallback_placement_policy = PlacementPolicy::default();
 
         #[cfg(feature = "lua")]
         let bindings = config
@@ -103,7 +122,7 @@ impl HeadlessSession {
         Self {
             output_state: OutputState::with_viewport("headless", Point::new(0.0, 0.0), viewport),
             focus_stack: FocusStack::default(),
-            fallback_placement_policy: PlacementPolicy::default(),
+            fallback_placement_policy,
             bindings,
             config_path,
             config,
@@ -257,6 +276,19 @@ impl HeadlessSession {
             Action::Spawn { command } => {
                 eprintln!("spawn action ignored in headless mode: {command}");
             }
+            Action::FocusNext => {
+                if let Some(id) = self.focus_stack.cycle_forward() {
+                    let _ = self.focus_window(id);
+                }
+            }
+            Action::FocusPrev => {
+                if let Some(id) = self.focus_stack.cycle_backward() {
+                    let _ = self.focus_window(id);
+                }
+            }
+            Action::Quit => {
+                eprintln!("quit action ignored in headless mode");
+            }
             other => other.apply_to_viewport(self.viewport_mut()),
         }
     }
@@ -408,7 +440,11 @@ impl ActionTarget for HeadlessSession {
         false
     }
 
-    fn begin_interactive_resize(&mut self, _id: WindowId, _edges: crate::window::ResizeEdges) -> bool {
+    fn begin_interactive_resize(
+        &mut self,
+        _id: WindowId,
+        _edges: crate::window::ResizeEdges,
+    ) -> bool {
         false
     }
 
@@ -424,8 +460,17 @@ impl ActionTarget for HeadlessSession {
         Self::close_window(self, id)
     }
 
+    fn spawn_command(&mut self, command: &str) -> bool {
+        if command.trim().is_empty() {
+            return false;
+        }
+        eprintln!("spawn action ignored in headless mode: {command}");
+        true
+    }
+
     fn pan_canvas(&mut self, dx: f64, dy: f64) {
-        self.viewport_mut().pan_world(crate::canvas::Vec2::new(dx, dy));
+        self.viewport_mut()
+            .pan_world(crate::canvas::Vec2::new(dx, dy));
     }
 
     fn zoom_canvas(&mut self, factor: f64) -> Result<(), ConfigError> {

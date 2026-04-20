@@ -3,6 +3,12 @@ use super::*;
 const MAX_IPC_REQUEST_BYTES: usize = 1024 * 1024;
 static IPC_SOCKET_COUNTER: AtomicUsize = AtomicUsize::new(1);
 
+fn encode_ipc_response(response: &crate::ipc::IpcResponse) -> String {
+    response.to_json_pretty().unwrap_or_else(|error| {
+        format!("{{\"type\":\"error\",\"message\":\"failed to encode ipc response: {error}\"}}")
+    })
+}
+
 impl EvilWm {
     pub(crate) fn init_ipc_listener(
         event_loop: &mut EventLoop<Self>,
@@ -16,11 +22,8 @@ impl EvilWm {
             .map(std::path::PathBuf::from)
             .unwrap_or_else(std::env::temp_dir);
         let unique = IPC_SOCKET_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let socket_path = runtime_dir.join(format!(
-            "evilwm-ipc-{}-{}.sock",
-            std::process::id(),
-            unique
-        ));
+        let socket_path =
+            runtime_dir.join(format!("evilwm-ipc-{}-{}.sock", std::process::id(), unique));
         if socket_path.exists() {
             let _ = std::fs::remove_file(&socket_path);
         }
@@ -116,13 +119,7 @@ impl EvilWm {
                                 },
                             };
 
-                            let encoded = response
-                                .to_json_pretty()
-                                .unwrap_or_else(|error| {
-                                    format!(
-                                        "{{\"type\":\"error\",\"message\":\"failed to encode ipc response: {error}\"}}"
-                                    )
-                                });
+                            let encoded = encode_ipc_response(&response);
                             state.trace_ipc_json(
                                 "responses.jsonl",
                                 serde_json::json!({
@@ -130,13 +127,6 @@ impl EvilWm {
                                 }),
                             );
                             state.emit_event("ipc_response_sent", serde_json::json!({}));
-                            let encoded = response
-                                .to_json_pretty()
-                                .unwrap_or_else(|error| {
-                                    format!(
-                                        "{{\"type\":\"error\",\"message\":\"failed to encode ipc response: {error}\"}}"
-                                    )
-                                });
                             let _ = stream.write_all(encoded.as_bytes());
                         }
                         Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
@@ -153,7 +143,10 @@ impl EvilWm {
         Ok(socket_path)
     }
 
-    pub(crate) fn handle_ipc_request(&mut self, request: crate::ipc::IpcRequest) -> crate::ipc::IpcResponse {
+    pub(crate) fn handle_ipc_request(
+        &mut self,
+        request: crate::ipc::IpcRequest,
+    ) -> crate::ipc::IpcResponse {
         match request {
             crate::ipc::IpcRequest::GetRuntimeSnapshot => {
                 crate::ipc::IpcResponse::RuntimeSnapshot {
@@ -195,6 +188,7 @@ impl EvilWm {
                         "screenshot_queued",
                         serde_json::json!({
                             "path": path.display().to_string(),
+                            "format": "ppm",
                         }),
                     );
                     self.request_redraw();

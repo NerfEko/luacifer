@@ -1,5 +1,10 @@
 use super::*;
-use smithay::{delegate_compositor, delegate_data_device, delegate_idle_inhibit, delegate_layer_shell, delegate_output, delegate_primary_selection, delegate_seat, delegate_shm, delegate_xdg_shell};
+use smithay::reexports::wayland_server::protocol::wl_data_source::WlDataSource;
+use smithay::wayland::selection::data_device::current_data_device_selection_userdata;
+use smithay::wayland::selection::primary_selection::current_primary_selection_userdata;
+use smithay::{delegate_compositor, delegate_data_device, delegate_idle_inhibit, delegate_layer_shell, delegate_output, delegate_primary_selection, delegate_seat, delegate_shm, delegate_xdg_decoration, delegate_xdg_shell};
+use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as XdgDecorationMode;
+use smithay::wayland::shell::xdg::decoration::XdgDecorationHandler;
 #[cfg(feature = "xwayland")]
 use smithay::delegate_xwayland_shell;
 
@@ -13,20 +18,44 @@ impl ClientData for ClientState {
     fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
 }
 
+fn fallback_compositor_client_state() -> &'static CompositorClientState {
+    static FALLBACK: std::sync::OnceLock<CompositorClientState> = std::sync::OnceLock::new();
+    FALLBACK.get_or_init(CompositorClientState::default)
+}
+
+fn compositor_client_state_or_fallback<'a>(
+    wayland_state: Option<&'a ClientState>,
+    #[cfg(feature = "xwayland")] xwayland_state: Option<&'a XWaylandClientData>,
+    warned: &AtomicBool,
+) -> &'a CompositorClientState {
+    if let Some(data) = wayland_state {
+        return &data.compositor_state;
+    }
+    #[cfg(feature = "xwayland")]
+    if let Some(data) = xwayland_state {
+        return &data.compositor_state;
+    }
+
+    if !warned.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "missing compositor client state for a wayland client; using a fallback compositor client state"
+        );
+    }
+    fallback_compositor_client_state()
+}
+
 impl CompositorHandler for EvilWm {
     fn compositor_state(&mut self) -> &mut CompositorState {
         &mut self.compositor_state
     }
 
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
-        if let Some(data) = client.get_data::<ClientState>() {
-            return &data.compositor_state;
-        }
-        #[cfg(feature = "xwayland")]
-        if let Some(data) = client.get_data::<XWaylandClientData>() {
-            return &data.compositor_state;
-        }
-        panic!("missing compositor client state for wayland client");
+        compositor_client_state_or_fallback(
+            client.get_data::<ClientState>(),
+            #[cfg(feature = "xwayland")]
+            client.get_data::<XWaylandClientData>(),
+            &self.missing_client_compositor_state_warned,
+        )
     }
 
     fn commit(&mut self, surface: &WlSurface) {
@@ -432,7 +461,11 @@ impl EvilWm {
     }
 
     #[cfg(feature = "lua")]
-    pub(crate) fn record_live_hook_error(&mut self, hook_name: &str, error: &crate::lua::ConfigError) {
+    pub(crate) fn record_live_hook_error(
+        &mut self,
+        hook_name: &str,
+        error: &crate::lua::ConfigError,
+    ) {
         let formatted = format_live_hook_error(hook_name, error);
         let entry = self
             .live_hook_errors
@@ -518,6 +551,16 @@ impl SeatHandler for EvilWm {
 
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
         let client = focused.and_then(|surface| self.display_handle.get_client(surface.id()).ok());
+        let clipboard_has_source = current_data_device_selection_userdata::<Self>(seat).is_some();
+        let primary_has_source = current_primary_selection_userdata::<Self>(seat).is_some();
+        self.emit_event(
+            "keyboard_focus_changed",
+            serde_json::json!({
+                "has_focus": client.is_some(),
+                "clipboard_has_source": clipboard_has_source,
+                "primary_has_source": primary_has_source,
+            }),
+        );
         set_data_device_focus(&self.display_handle, seat, client.clone());
         set_primary_focus(&self.display_handle, seat, client);
     }
@@ -525,6 +568,34 @@ impl SeatHandler for EvilWm {
 
 impl SelectionHandler for EvilWm {
     type SelectionUserData = ();
+
+    fn new_selection(
+        &mut self,
+        ty: smithay::wayland::selection::SelectionTarget,
+        source: Option<smithay::wayland::selection::SelectionSource>,
+        _seat: Seat<Self>,
+    ) {
+        let target = match ty {
+            smithay::wayland::selection::SelectionTarget::Clipboard => "clipboard",
+            smithay::wayland::selection::SelectionTarget::Primary => "primary",
+        };
+        let has_source = source.is_some();
+        let mime_types: Vec<String> = source.as_ref().map(|s| s.mime_types()).unwrap_or_default();
+        let stage = if has_source {
+            "source_registered"
+        } else {
+            "selection_cleared"
+        };
+        self.emit_event(
+            "selection_changed",
+            serde_json::json!({
+                "target": target,
+                "stage": stage,
+                "has_source": has_source,
+                "mime_types": mime_types,
+            }),
+        );
+    }
 }
 
 impl PrimarySelectionHandler for EvilWm {
@@ -549,10 +620,54 @@ impl DataDeviceHandler for EvilWm {
     }
 }
 
-impl ClientDndGrabHandler for EvilWm {}
+impl ClientDndGrabHandler for EvilWm {
+    fn started(
+        &mut self,
+        source: Option<WlDataSource>,
+        _icon: Option<WlSurface>,
+        _seat: Seat<Self>,
+    ) {
+        let mime_types: Vec<String> = source
+            .as_ref()
+            .and_then(|s| {
+                use smithay::wayland::selection::data_device::with_source_metadata;
+                with_source_metadata(s, |meta| meta.mime_types.clone()).ok()
+            })
+            .unwrap_or_default();
+        self.emit_event(
+            "dnd_started",
+            serde_json::json!({
+                "has_source": source.is_some(),
+                "mime_types": mime_types,
+            }),
+        );
+    }
+
+    fn dropped(&mut self, _target: Option<WlSurface>, validated: bool, _seat: Seat<Self>) {
+        self.emit_event(
+            "dnd_dropped",
+            serde_json::json!({
+                "validated": validated,
+            }),
+        );
+    }
+}
 
 impl ServerDndGrabHandler for EvilWm {
-    fn send(&mut self, _mime_type: String, _fd: OwnedFd, _seat: Seat<Self>) {}
+    fn send(&mut self, mime_type: String, _fd: OwnedFd, _seat: Seat<Self>) {
+        // Compositor-originated DnD is not supported; log explicitly so the gap is visible.
+        self.emit_event(
+            "server_dnd_unsupported",
+            serde_json::json!({
+                "mime_type": mime_type,
+                "reason": "compositor_originated_dnd_not_supported",
+            }),
+        );
+    }
+
+    fn cancelled(&mut self, _seat: Seat<Self>) {
+        self.emit_event("server_dnd_cancelled", serde_json::json!({}));
+    }
 }
 
 impl OutputProtocolHandler for EvilWm {
@@ -562,15 +677,71 @@ impl OutputProtocolHandler for EvilWm {
 
     fn apply_output_config(
         &mut self,
-        _configs: Vec<crate::output_management_protocol::RequestedHeadConfig>,
+        configs: Vec<crate::output_management_protocol::RequestedHeadConfig>,
     ) -> bool {
-        false
+        let outputs: Vec<Output> = self.space.outputs().cloned().collect();
+        for config in &configs {
+            let Some(output) = outputs.iter().find(|o| o.name() == config.output_name) else {
+                return false;
+            };
+            if !config.enabled {
+                // Disable: unmap the output from the space and remove its runtime state.
+                self.space.unmap_output(output);
+                self.output_states.remove(&config.output_name);
+                self.emit_event(
+                    "output_disabled",
+                    serde_json::json!({
+                        "name": config.output_name,
+                    }),
+                );
+                continue;
+            }
+            if let Some((x, y)) = config.position {
+                let size = self
+                    .space
+                    .output_geometry(output)
+                    .map(|g| g.size)
+                    .or_else(|| {
+                        self.output_state_for_name(&config.output_name).map(|s| {
+                            let sz = s.viewport().screen_size();
+                            smithay::utils::Size::from((sz.w as i32, sz.h as i32))
+                        })
+                    })
+                    .unwrap_or_else(|| smithay::utils::Size::from((0, 0)));
+                self.space.map_output(output, (x, y));
+                self.sync_output_state(
+                    &config.output_name,
+                    crate::canvas::Point::new(x as f64, y as f64),
+                    crate::canvas::Size::new(size.w as f64, size.h as f64),
+                );
+            }
+        }
+        self.notify_output_management_state();
+        true
     }
 }
 
 impl OutputHandler for EvilWm {}
 
+impl XdgDecorationHandler for EvilWm {
+    fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        self.apply_preferred_decoration_mode(&toplevel);
+        toplevel.send_configure();
+    }
+
+    fn request_mode(&mut self, toplevel: ToplevelSurface, _mode: XdgDecorationMode) {
+        self.apply_preferred_decoration_mode(&toplevel);
+        toplevel.send_configure();
+    }
+
+    fn unset_mode(&mut self, toplevel: ToplevelSurface) {
+        self.apply_preferred_decoration_mode(&toplevel);
+        toplevel.send_configure();
+    }
+}
+
 delegate_xdg_shell!(EvilWm);
+delegate_xdg_decoration!(EvilWm);
 delegate_layer_shell!(EvilWm);
 #[cfg(feature = "xwayland")]
 delegate_xwayland_shell!(EvilWm);
@@ -582,3 +753,43 @@ delegate_primary_selection!(EvilWm);
 delegate_idle_inhibit!(EvilWm);
 crate::delegate_output_management!(EvilWm);
 delegate_output!(EvilWm);
+
+#[cfg(test)]
+mod tests {
+    use super::compositor_client_state_or_fallback;
+    use std::{
+        ptr,
+        sync::atomic::{AtomicBool, Ordering},
+    };
+
+    #[test]
+    fn compositor_client_state_falls_back_without_panicking() {
+        let warned = AtomicBool::new(false);
+
+        let resolved = compositor_client_state_or_fallback(
+            None,
+            #[cfg(feature = "xwayland")]
+            None,
+            &warned,
+        );
+
+        assert!(ptr::eq(resolved, super::fallback_compositor_client_state()));
+        assert!(warned.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn compositor_client_state_prefers_known_wayland_state() {
+        let warned = AtomicBool::new(false);
+        let wayland = super::ClientState::default();
+
+        let resolved = compositor_client_state_or_fallback(
+            Some(&wayland),
+            #[cfg(feature = "xwayland")]
+            None,
+            &warned,
+        );
+
+        assert!(ptr::eq(resolved, &wayland.compositor_state));
+        assert!(!warned.load(Ordering::Relaxed));
+    }
+}

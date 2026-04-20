@@ -236,6 +236,17 @@ impl HeadlessSession {
                 }
             }
             Action::Spawn { .. } => {}
+            Action::FocusNext => {
+                if let Some(id) = self.focus_stack.cycle_forward() {
+                    let _ = self.focus_window(id);
+                }
+            }
+            Action::FocusPrev => {
+                if let Some(id) = self.focus_stack.cycle_backward() {
+                    let _ = self.focus_window(id);
+                }
+            }
+            Action::Quit => {} // headless sessions do not have a loop to stop
             other => other.apply_to_viewport(self.viewport_mut()),
         }
     }

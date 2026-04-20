@@ -1,4 +1,5 @@
 use super::*;
+use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as XdgDecorationMode;
 
 impl EvilWm {
     pub fn focus_window(&mut self, id: WindowId) -> bool {
@@ -170,6 +171,19 @@ impl EvilWm {
                 );
                 self.zoom_all_viewports_at_primary(anchor, factor);
             }
+            crate::input::Action::FocusNext => {
+                if let Some(id) = self.focus_stack.cycle_forward() {
+                    let _ = self.focus_window(id);
+                }
+            }
+            crate::input::Action::FocusPrev => {
+                if let Some(id) = self.focus_stack.cycle_backward() {
+                    let _ = self.focus_window(id);
+                }
+            }
+            crate::input::Action::Quit => {
+                self.loop_signal.stop();
+            }
         }
         self.request_redraw();
     }
@@ -225,6 +239,25 @@ impl EvilWm {
             .as_ref()
             .map(|config| config.window.clone())
             .unwrap_or_default()
+    }
+
+    pub(crate) fn hide_client_decorations_enabled(&self) -> bool {
+        self.sizing_config().hide_client_decorations
+    }
+
+    pub(crate) fn preferred_decoration_mode(&self) -> XdgDecorationMode {
+        if self.hide_client_decorations_enabled() {
+            XdgDecorationMode::ServerSide
+        } else {
+            XdgDecorationMode::ClientSide
+        }
+    }
+
+    pub(crate) fn apply_preferred_decoration_mode(&self, surface: &ToplevelSurface) {
+        let mode = self.preferred_decoration_mode();
+        surface.with_pending_state(|state| {
+            state.decoration_mode = Some(mode);
+        });
     }
 
     pub(crate) fn size_memory_key(properties: &WindowProperties) -> Option<String> {
@@ -343,7 +376,10 @@ impl EvilWm {
         bounds
     }
 
-    pub(crate) fn apply_rules_to_window(window: &mut WindowModel, applied_rules: &AppliedWindowRules) {
+    pub(crate) fn apply_rules_to_window(
+        window: &mut WindowModel,
+        applied_rules: &AppliedWindowRules,
+    ) {
         if let Some(floating) = applied_rules.floating {
             window.floating = floating;
         }
@@ -502,7 +538,10 @@ impl EvilWm {
     ///
     /// This is the compositor's current window-to-output association rule.
     /// Returns `None` if the window center is not inside any output's visible world.
-    pub(crate) fn output_id_for_window_bounds(&self, bounds: crate::canvas::Rect) -> Option<String> {
+    pub(crate) fn output_id_for_window_bounds(
+        &self,
+        bounds: crate::canvas::Rect,
+    ) -> Option<String> {
         let center_x = bounds.origin.x + bounds.size.w / 2.0;
         let center_y = bounds.origin.y + bounds.size.h / 2.0;
 

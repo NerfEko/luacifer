@@ -4,10 +4,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use mlua::{Table, Value};
+use mlua::{Lua, Table, Value};
 
-use crate::input::parse_keyspec;
 use crate::input::bindings::canonical_modifier_name;
+use crate::input::parse_keyspec;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
@@ -15,6 +15,8 @@ pub struct Config {
     pub canvas: CanvasConfig,
     pub draw: DrawConfig,
     pub window: WindowConfig,
+    pub placement: PlacementConfig,
+    pub tty: TtyConfig,
     pub autostart: Vec<String>,
     pub bindings: Vec<BindingConfig>,
     pub rules: Vec<RuleConfig>,
@@ -27,6 +29,9 @@ pub struct CanvasConfig {
     pub max_zoom: f64,
     pub zoom_step: f64,
     pub pan_step: f64,
+    pub allow_pointer_zoom: bool,
+    pub allow_middle_click_pan: bool,
+    pub allow_gesture_navigation: bool,
 }
 
 impl Default for CanvasConfig {
@@ -36,6 +41,9 @@ impl Default for CanvasConfig {
             max_zoom: 8.0,
             zoom_step: 1.2,
             pan_step: 64.0,
+            allow_pointer_zoom: true,
+            allow_middle_click_pan: true,
+            allow_gesture_navigation: true,
         }
     }
 }
@@ -44,6 +52,8 @@ impl Default for CanvasConfig {
 pub enum DrawLayer {
     Background,
     Windows,
+    WindowOverlay,
+    Popups,
     Overlay,
     Cursor,
 }
@@ -52,6 +62,8 @@ pub enum DrawLayer {
 pub struct DrawConfig {
     /// User-facing stacking order from bottom-most layer to top-most layer.
     pub stack: Vec<DrawLayer>,
+    /// Clear color used before compositing draw/background/window layers.
+    pub clear_color: [f32; 4],
 }
 
 impl Default for DrawConfig {
@@ -60,9 +72,12 @@ impl Default for DrawConfig {
             stack: vec![
                 DrawLayer::Background,
                 DrawLayer::Windows,
+                DrawLayer::WindowOverlay,
+                DrawLayer::Popups,
                 DrawLayer::Overlay,
                 DrawLayer::Cursor,
             ],
+            clear_color: [0.08, 0.05, 0.12, 1.0],
         }
     }
 }
@@ -71,6 +86,49 @@ impl Default for DrawConfig {
 pub struct WindowConfig {
     pub use_client_default_size: bool,
     pub remember_sizes_by_app_id: bool,
+    pub hide_client_decorations: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacementConfig {
+    pub default_size: (f64, f64),
+    pub padding: f64,
+    pub cascade_step: (f64, f64),
+}
+
+impl Default for PlacementConfig {
+    fn default() -> Self {
+        Self {
+            default_size: (900.0, 600.0),
+            padding: 32.0,
+            cascade_step: (32.0, 24.0),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TtyOutputLayout {
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TtyConfig {
+    pub quit_mods: Vec<String>,
+    pub quit_key: String,
+    pub vt_switch_modifiers: Vec<String>,
+    pub output_layout: TtyOutputLayout,
+}
+
+impl Default for TtyConfig {
+    fn default() -> Self {
+        Self {
+            quit_mods: vec!["Ctrl".into(), "Alt".into()],
+            quit_key: "Backspace".into(),
+            vt_switch_modifiers: vec!["Ctrl".into(), "Alt".into()],
+            output_layout: TtyOutputLayout::Horizontal,
+        }
+    }
 }
 
 impl Default for WindowConfig {
@@ -78,6 +136,7 @@ impl Default for WindowConfig {
         Self {
             use_client_default_size: true,
             remember_sizes_by_app_id: true,
+            hide_client_decorations: false,
         }
     }
 }
@@ -117,13 +176,18 @@ pub(crate) struct ConfigBuilder {
     canvas: CanvasConfig,
     draw: DrawConfig,
     window: WindowConfig,
+    placement: PlacementConfig,
+    tty: TtyConfig,
     autostart: Vec<String>,
     bindings: Vec<BindingConfig>,
     rules: Vec<RuleConfig>,
     used_script_api: bool,
 }
 
-pub(crate) fn resolve_include_path(base_dir: &Path, relative_path: &Path) -> Result<PathBuf, ConfigError> {
+pub(crate) fn resolve_include_path(
+    base_dir: &Path,
+    relative_path: &Path,
+) -> Result<PathBuf, ConfigError> {
     if relative_path.is_absolute() {
         return Err(ConfigError::Validation(
             "include() only accepts relative paths inside the config root".into(),
@@ -148,6 +212,19 @@ pub(crate) fn resolve_include_path(base_dir: &Path, relative_path: &Path) -> Res
     }
 
     Ok(canonical_path)
+}
+
+pub(crate) fn register_root_include(lua: &Lua, base_dir: PathBuf) -> Result<(), ConfigError> {
+    let include = lua.create_function(move |lua, relative_path: String| {
+        let full_path = resolve_include_path(&base_dir, Path::new(&relative_path))
+            .map_err(mlua::Error::external)?;
+        let source = fs::read_to_string(&full_path).map_err(mlua::Error::external)?;
+        lua.load(&source)
+            .set_name(full_path.to_string_lossy().as_ref())
+            .eval::<Value>()
+    })?;
+    lua.globals().set("include", include)?;
+    Ok(())
 }
 
 impl Config {
@@ -182,11 +259,24 @@ impl Config {
             WindowConfig::default()
         };
 
+        let placement = if let Some(placement_table) = table.get::<Option<Table>>("placement")? {
+            parse_placement_table(&placement_table, PlacementConfig::default())?
+        } else {
+            PlacementConfig::default()
+        };
+        let tty = if let Some(tty_table) = table.get::<Option<Table>>("tty")? {
+            parse_tty_table(&tty_table, TtyConfig::default())?
+        } else {
+            TtyConfig::default()
+        };
+
         let config = Self {
             backend,
             canvas,
             draw,
             window,
+            placement,
+            tty,
             autostart,
             bindings,
             rules,
@@ -198,7 +288,7 @@ impl Config {
 
     pub fn validate(&self) -> Result<(), ConfigError> {
         if let Some(backend) = self.backend.as_deref()
-            && !matches!(backend, "x11" | "winit" | "udev" | "headless")
+            && !matches!(backend, "winit" | "udev" | "headless")
         {
             return Err(ConfigError::Validation(format!(
                 "unsupported backend in config: {backend}"
@@ -247,6 +337,9 @@ impl Config {
         }
 
         validate_draw_stack(&self.draw.stack)?;
+        validate_color(&self.draw.clear_color, "draw.clear_color")?;
+        validate_placement(&self.placement)?;
+        validate_tty(&self.tty)?;
 
         const SUPPORTED_ACTIONS: &[&str] = &[
             "pan_left",
@@ -257,6 +350,9 @@ impl Config {
             "zoom_out",
             "close_window",
             "spawn",
+            "focus_next",
+            "focus_prev",
+            "quit",
         ];
 
         for binding in &self.bindings {
@@ -351,6 +447,12 @@ impl ConfigBuilder {
         if let Some(window_table) = table.get::<Option<Table>>("window")? {
             self.window = parse_window_table(&window_table, self.window.clone())?;
         }
+        if let Some(placement_table) = table.get::<Option<Table>>("placement")? {
+            self.placement = parse_placement_table(&placement_table, self.placement.clone())?;
+        }
+        if let Some(tty_table) = table.get::<Option<Table>>("tty")? {
+            self.tty = parse_tty_table(&tty_table, self.tty.clone())?;
+        }
 
         self.autostart
             .extend(parse_string_list(table.get::<Option<Table>>("autostart")?)?);
@@ -409,6 +511,8 @@ impl ConfigBuilder {
             canvas: self.canvas.clone(),
             draw: self.draw.clone(),
             window: self.window.clone(),
+            placement: self.placement.clone(),
+            tty: self.tty.clone(),
             autostart: self.autostart.clone(),
             bindings: self.bindings.clone(),
             rules: self.rules.clone(),
@@ -459,6 +563,15 @@ fn parse_canvas_table(table: &Table, base: CanvasConfig) -> Result<CanvasConfig,
         pan_step: table
             .get::<Option<f64>>("pan_step")?
             .unwrap_or(base.pan_step),
+        allow_pointer_zoom: table
+            .get::<Option<bool>>("allow_pointer_zoom")?
+            .unwrap_or(base.allow_pointer_zoom),
+        allow_middle_click_pan: table
+            .get::<Option<bool>>("allow_middle_click_pan")?
+            .unwrap_or(base.allow_middle_click_pan),
+        allow_gesture_navigation: table
+            .get::<Option<bool>>("allow_gesture_navigation")?
+            .unwrap_or(base.allow_gesture_navigation),
     })
 }
 
@@ -467,7 +580,11 @@ fn parse_draw_table(table: &Table, base: DrawConfig) -> Result<DrawConfig, Confi
         Some(stack_table) => parse_draw_stack(&stack_table)?,
         None => base.stack,
     };
-    Ok(DrawConfig { stack })
+    let clear_color = match table.get::<Option<Table>>("clear_color")? {
+        Some(color_table) => parse_color_table(&color_table, "draw.clear_color")?,
+        None => base.clear_color,
+    };
+    Ok(DrawConfig { stack, clear_color })
 }
 
 fn parse_window_table(table: &Table, base: WindowConfig) -> Result<WindowConfig, ConfigError> {
@@ -478,6 +595,74 @@ fn parse_window_table(table: &Table, base: WindowConfig) -> Result<WindowConfig,
         remember_sizes_by_app_id: table
             .get::<Option<bool>>("remember_sizes_by_app_id")?
             .unwrap_or(base.remember_sizes_by_app_id),
+        hide_client_decorations: table
+            .get::<Option<bool>>("hide_client_decorations")?
+            .unwrap_or(base.hide_client_decorations),
+    })
+}
+
+fn parse_placement_table(
+    table: &Table,
+    base: PlacementConfig,
+) -> Result<PlacementConfig, ConfigError> {
+    let default_size = match table.get::<Option<Table>>("default_size")? {
+        Some(size_table) => (
+            size_table
+                .get::<Option<f64>>("w")?
+                .unwrap_or(base.default_size.0),
+            size_table
+                .get::<Option<f64>>("h")?
+                .unwrap_or(base.default_size.1),
+        ),
+        None => base.default_size,
+    };
+    let cascade_step = match table.get::<Option<Table>>("cascade_step")? {
+        Some(step_table) => (
+            step_table
+                .get::<Option<f64>>("x")?
+                .unwrap_or(base.cascade_step.0),
+            step_table
+                .get::<Option<f64>>("y")?
+                .unwrap_or(base.cascade_step.1),
+        ),
+        None => base.cascade_step,
+    };
+
+    Ok(PlacementConfig {
+        default_size,
+        padding: table.get::<Option<f64>>("padding")?.unwrap_or(base.padding),
+        cascade_step,
+    })
+}
+
+fn parse_tty_table(table: &Table, base: TtyConfig) -> Result<TtyConfig, ConfigError> {
+    let (quit_mods, quit_key) =
+        if let Some(keyspec) = table.get::<Option<String>>("quit_keyspec")? {
+            parse_keyspec(&keyspec).map_err(ConfigError::Validation)?
+        } else {
+            (base.quit_mods, base.quit_key)
+        };
+
+    let vt_switch_modifiers = match table.get::<Option<Table>>("vt_switch_modifiers")? {
+        Some(mods_table) => parse_modifier_name_list(&mods_table, "tty.vt_switch_modifiers")?,
+        None => base.vt_switch_modifiers,
+    };
+    let output_layout = match table.get::<Option<String>>("output_layout")?.as_deref() {
+        Some("horizontal") => TtyOutputLayout::Horizontal,
+        Some("vertical") => TtyOutputLayout::Vertical,
+        Some(other) => {
+            return Err(ConfigError::Validation(format!(
+                "unsupported tty.output_layout: {other}"
+            )));
+        }
+        None => base.output_layout,
+    };
+
+    Ok(TtyConfig {
+        quit_mods,
+        quit_key,
+        vt_switch_modifiers,
+        output_layout,
     })
 }
 
@@ -493,6 +678,8 @@ fn parse_draw_layer_name(name: &str) -> Result<DrawLayer, ConfigError> {
     match name {
         "background" => Ok(DrawLayer::Background),
         "windows" => Ok(DrawLayer::Windows),
+        "window_overlay" => Ok(DrawLayer::WindowOverlay),
+        "popups" => Ok(DrawLayer::Popups),
         "overlay" => Ok(DrawLayer::Overlay),
         "cursor" => Ok(DrawLayer::Cursor),
         _ => Err(ConfigError::Validation(format!(
@@ -502,25 +689,101 @@ fn parse_draw_layer_name(name: &str) -> Result<DrawLayer, ConfigError> {
 }
 
 fn validate_draw_stack(stack: &[DrawLayer]) -> Result<(), ConfigError> {
-    use DrawLayer::{Background, Cursor, Overlay, Windows};
+    use DrawLayer::{Background, Cursor, Overlay, Popups, WindowOverlay, Windows};
 
-    if stack.len() != 4 {
+    if stack.len() != 6 {
         return Err(ConfigError::Validation(
-            "draw.stack must list exactly 4 layers: background, windows, overlay, cursor"
-                .into(),
+            "draw.stack must list exactly 6 layers: background, windows, window_overlay, popups, overlay, cursor".into(),
         ));
     }
 
-    for required in [Background, Windows, Overlay, Cursor] {
+    for required in [Background, Windows, WindowOverlay, Popups, Overlay, Cursor] {
         let count = stack.iter().filter(|layer| **layer == required).count();
         if count != 1 {
             return Err(ConfigError::Validation(
-                "draw.stack must include each layer exactly once: background, windows, overlay, cursor"
+                "draw.stack must include each layer exactly once: background, windows, window_overlay, popups, overlay, cursor"
                     .into(),
             ));
         }
     }
 
+    Ok(())
+}
+
+fn parse_color_table(table: &Table, field_name: &str) -> Result<[f32; 4], ConfigError> {
+    let mut color = [0.0_f32; 4];
+    for (index, slot) in color.iter_mut().enumerate() {
+        let component = table.get::<f64>((index + 1) as i64).map_err(|_| {
+            ConfigError::Validation(format!(
+                "{field_name} must contain exactly 4 numeric components"
+            ))
+        })?;
+        if !component.is_finite() {
+            return Err(ConfigError::Validation(format!(
+                "{field_name} components must be finite"
+            )));
+        }
+        *slot = component as f32;
+    }
+    Ok(color)
+}
+
+fn parse_modifier_name_list(table: &Table, field_name: &str) -> Result<Vec<String>, ConfigError> {
+    let mut modifiers = Vec::new();
+    for item in table.sequence_values::<String>() {
+        let name = item?;
+        let canonical = canonical_modifier_name(&name).ok_or_else(|| {
+            ConfigError::Validation(format!("unsupported modifier in {field_name}: {name}"))
+        })?;
+        modifiers.push(canonical.to_string());
+    }
+    Ok(modifiers)
+}
+
+fn validate_color(color: &[f32; 4], field_name: &str) -> Result<(), ConfigError> {
+    if color.iter().any(|component| !component.is_finite()) {
+        return Err(ConfigError::Validation(format!(
+            "{field_name} must contain finite components"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_placement(placement: &PlacementConfig) -> Result<(), ConfigError> {
+    if !placement.default_size.0.is_finite() || placement.default_size.0 <= 0.0 {
+        return Err(ConfigError::Validation(
+            "placement.default_size.w must be a positive finite number".into(),
+        ));
+    }
+    if !placement.default_size.1.is_finite() || placement.default_size.1 <= 0.0 {
+        return Err(ConfigError::Validation(
+            "placement.default_size.h must be a positive finite number".into(),
+        ));
+    }
+    if !placement.padding.is_finite() || placement.padding < 0.0 {
+        return Err(ConfigError::Validation(
+            "placement.padding must be a finite number >= 0".into(),
+        ));
+    }
+    if !placement.cascade_step.0.is_finite() || !placement.cascade_step.1.is_finite() {
+        return Err(ConfigError::Validation(
+            "placement.cascade_step must use finite numbers".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_tty(tty: &TtyConfig) -> Result<(), ConfigError> {
+    if tty.quit_key.trim().is_empty() {
+        return Err(ConfigError::Validation(
+            "tty.quit_keyspec must not be empty".into(),
+        ));
+    }
+    if tty.vt_switch_modifiers.is_empty() {
+        return Err(ConfigError::Validation(
+            "tty.vt_switch_modifiers must not be empty".into(),
+        ));
+    }
     Ok(())
 }
 

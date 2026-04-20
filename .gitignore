@@ -1,8 +1,17 @@
+# Build artifacts
 target/
+*.log
+
+# Local environment / tooling
 .direnv/
 .env
-*.log
 .pi/
 CLAUDE.md
+
+# Local notes and release-maintenance helpers
 review.md
 GITHUB-RELEASE.md
+scripts/update-github-release-branch.sh
+
+# Forgejo branch-specific
+.github/

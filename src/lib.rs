@@ -8,4 +8,5 @@ pub mod ipc;
 pub mod lua;
 pub mod output;
 pub mod output_management_protocol;
+pub mod probe;
 pub mod window;

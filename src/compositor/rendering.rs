@@ -87,6 +87,14 @@ impl ActionTarget for EvilWm {
         Self::close_window(self, id)
     }
 
+    fn spawn_command(&mut self, command: &str) -> bool {
+        if command.trim().is_empty() {
+            return false;
+        }
+        super::spawn_client(command, &self.socket_name, &self.ipc_socket_path);
+        true
+    }
+
     fn pan_canvas(&mut self, dx: f64, dy: f64) {
         self.pan_all_viewports(crate::canvas::Vec2::new(dx, dy));
     }
@@ -182,6 +190,8 @@ pub(crate) fn configured_draw_stack(state: &EvilWm) -> &[DrawLayer] {
         .unwrap_or(&[
             DrawLayer::Background,
             DrawLayer::Windows,
+            DrawLayer::WindowOverlay,
+            DrawLayer::Popups,
             DrawLayer::Overlay,
             DrawLayer::Cursor,
         ])
@@ -219,10 +229,31 @@ fn draw_rect_to_physical(
         }
     };
 
-    let width = screen_w.round().max(1.0) as i32;
-    let height = screen_h.round().max(1.0) as i32;
-    let left = screen_x.round() as i32;
-    let top = screen_y.round() as i32;
+    let screen = viewport.screen_size();
+    let unclipped_right = screen_x + screen_w;
+    let unclipped_bottom = screen_y + screen_h;
+
+    if unclipped_right <= 0.0
+        || unclipped_bottom <= 0.0
+        || screen_x >= screen.w
+        || screen_y >= screen.h
+    {
+        return None;
+    }
+
+    let clipped_left = screen_x.max(0.0);
+    let clipped_top = screen_y.max(0.0);
+    let clipped_right = unclipped_right.min(screen.w);
+    let clipped_bottom = unclipped_bottom.min(screen.h);
+
+    if clipped_right <= clipped_left || clipped_bottom <= clipped_top {
+        return None;
+    }
+
+    let width = (clipped_right - clipped_left).round().max(1.0) as i32;
+    let height = (clipped_bottom - clipped_top).round().max(1.0) as i32;
+    let left = clipped_left.round() as i32;
+    let top = clipped_top.round() as i32;
 
     Some(Rectangle::<i32, Physical>::new(
         (left, top).into(),
@@ -258,7 +289,7 @@ pub(crate) fn solid_elements_from_draw_commands(
     hook_name: &str,
 ) -> Vec<SolidColorRenderElement> {
     let commands = draw_commands_for_output(state, output, hook_name);
-    let mut elements = Vec::new();
+    let mut elements = Vec::with_capacity(commands.len());
     for command in commands {
         match command {
             DrawCommand::Rect {
@@ -338,19 +369,25 @@ pub(crate) fn lock_overlay_elements(
     )]
 }
 
+/// Write a PPM (P6 binary) screenshot and return the total bytes written.
+///
+/// PPM is chosen deliberately: it requires no external crate, is trivially
+/// verifiable in tests, and needs no decoder to inspect in CI artifacts.
 pub(super) fn write_ppm_screenshot(
     path: &std::path::Path,
     size: smithay::utils::Size<i32, Physical>,
     pixels: &[u8],
     flipped: bool,
-) -> Result<(), std::io::Error> {
+) -> Result<usize, std::io::Error> {
     use std::io::Write;
 
     let width = size.w.max(1) as usize;
     let height = size.h.max(1) as usize;
     let stride = width * 4;
+    let header = format!("P6\n{} {}\n255\n", width, height);
+    let mut written = header.len();
     let mut file = std::fs::File::create(path)?;
-    write!(file, "P6\n{} {}\n255\n", width, height)?;
+    file.write_all(header.as_bytes())?;
 
     for row in 0..height {
         let source_row = if flipped { height - 1 - row } else { row };
@@ -359,10 +396,183 @@ pub(super) fn write_ppm_screenshot(
         let row_pixels = &pixels[start..end];
         for chunk in row_pixels.chunks_exact(4) {
             file.write_all(&chunk[0..3])?;
+            written += 3;
         }
     }
 
-    Ok(())
+    Ok(written)
+}
+
+pub(crate) struct SplitSpaceElements<T> {
+    pub windows: Vec<T>,
+    pub popups: Vec<T>,
+}
+
+#[cfg(any(feature = "winit", feature = "x11"))]
+pub(crate) fn build_winit_space_elements(
+    state: &EvilWm,
+    renderer: &mut GlesRenderer,
+    output: &Output,
+) -> Result<
+    SplitSpaceElements<
+        smithay::desktop::space::SpaceRenderElements<
+            GlesRenderer,
+            smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement<GlesRenderer>,
+        >,
+    >,
+    smithay::output::OutputNoMode,
+> {
+    let output_scale = output.current_scale().fractional_scale();
+    let output_geo = state
+        .space
+        .output_geometry(output)
+        .ok_or(smithay::output::OutputNoMode)?;
+    let scale = smithay::utils::Scale::from(output_scale);
+
+    let mut windows = Vec::new();
+    let mut popups = Vec::new();
+
+    let lower_layers = {
+        let layer_map = layer_map_for_output(output);
+        let (lower, upper): (Vec<DesktopLayerSurface>, Vec<DesktopLayerSurface>) =
+            layer_map.layers().rev().cloned().partition(|surface| {
+                matches!(surface.layer(), WlrLayer::Background | WlrLayer::Bottom)
+            });
+
+        popups.extend(
+            upper
+                .into_iter()
+                .filter_map(|surface| {
+                    layer_map
+                        .layer_geometry(&surface)
+                        .map(|geo| (geo.loc, surface))
+                })
+                .flat_map(|(loc, surface)| {
+                    smithay::backend::renderer::element::AsRenderElements::<GlesRenderer>::render_elements::<
+                        smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement<
+                            GlesRenderer,
+                        >,
+                    >(
+                        &surface,
+                        renderer,
+                        loc.to_physical_precise_round(output_scale),
+                        scale,
+                        1.0,
+                    )
+                    .into_iter()
+                    .map(smithay::desktop::space::SpaceRenderElements::Surface)
+                }),
+        );
+
+        lower
+    };
+
+    for window in state.space.elements().rev() {
+        let Some(space_bbox) = state.space.element_bbox(window) else {
+            continue;
+        };
+        if !output_geo.overlaps(space_bbox) {
+            continue;
+        }
+
+        let Some(element_location) = state.space.element_location(window) else {
+            continue;
+        };
+        let render_location = element_location - window.geometry().loc - output_geo.loc;
+        let physical_location = render_location.to_physical_precise_round(output_scale);
+
+        match window.underlying_surface() {
+            smithay::desktop::WindowSurface::Wayland(toplevel) => {
+                windows.extend(
+                    smithay::backend::renderer::element::surface::render_elements_from_surface_tree::<
+                                _,
+                                smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement<GlesRenderer>,
+                            >(
+                        renderer,
+                        toplevel.wl_surface(),
+                        physical_location,
+                        scale,
+                        1.0,
+                        Kind::Unspecified,
+                    )
+                    .into_iter()
+                    .map(|element| {
+                        smithay::desktop::space::SpaceRenderElements::Element(smithay::backend::renderer::element::Wrap::from(element))
+                    }),
+                );
+
+                popups.extend(
+                    PopupManager::popups_for_surface(toplevel.wl_surface())
+                        .flat_map(|(popup, popup_offset)| {
+                            let popup_render_location =
+                                element_location + popup_offset - popup.geometry().loc - output_geo.loc;
+                            smithay::backend::renderer::element::surface::render_elements_from_surface_tree::<
+                                _,
+                                smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement<GlesRenderer>,
+                            >(
+                                renderer,
+                                popup.wl_surface(),
+                                popup_render_location.to_physical_precise_round(output_scale),
+                                scale,
+                                1.0,
+                                Kind::Unspecified,
+                            )
+                        })
+                        .map(|element| {
+                            smithay::desktop::space::SpaceRenderElements::Element(smithay::backend::renderer::element::Wrap::from(element))
+                        }),
+                );
+            }
+            #[cfg(feature = "xwayland")]
+            smithay::desktop::WindowSurface::X11(surface) => {
+                let elements = smithay::backend::renderer::element::AsRenderElements::<GlesRenderer>::render_elements::<
+                    smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement<
+                        GlesRenderer,
+                    >,
+                >(surface, renderer, physical_location, scale, 1.0)
+                .into_iter()
+                .map(|element| {
+                    smithay::desktop::space::SpaceRenderElements::Element(smithay::backend::renderer::element::Wrap::from(element))
+                });
+
+                if surface.is_override_redirect()
+                    || surface.is_popup()
+                    || surface.is_transient_for().is_some()
+                {
+                    popups.extend(elements);
+                } else {
+                    windows.extend(elements);
+                }
+            }
+        }
+    }
+
+    windows.extend(
+        lower_layers
+            .into_iter()
+            .filter_map(|surface| {
+                layer_map_for_output(output)
+                    .layer_geometry(&surface)
+                    .map(|geo| (geo.loc, surface))
+            })
+            .flat_map(|(loc, surface)| {
+                smithay::backend::renderer::element::AsRenderElements::<GlesRenderer>::render_elements::<
+                    smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement<
+                        GlesRenderer,
+                    >,
+                >(
+                    &surface,
+                    renderer,
+                    loc.to_physical_precise_round(output_scale),
+                    scale,
+                    1.0,
+                )
+                .into_iter()
+                .map(smithay::desktop::space::SpaceRenderElements::Surface)
+            }),
+    );
+
+    Ok(SplitSpaceElements { windows, popups })
 }
 
 #[cfg(feature = "udev")]
@@ -393,28 +603,130 @@ pub(crate) fn build_live_space_elements(
     state: &EvilWm,
     renderer: &mut GlesRenderer,
     output: &Output,
-) -> Vec<
+) -> SplitSpaceElements<
     smithay::desktop::space::SpaceRenderElements<
         GlesRenderer,
-        RescaleRenderElement<<Window as AsRenderElements<GlesRenderer>>::RenderElement>,
+        RescaleRenderElement<
+            smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement<GlesRenderer>,
+        >,
     >,
 > {
     let Some(region) = output_visible_world_geometry(state, output) else {
-        return Vec::new();
+        return SplitSpaceElements {
+            windows: Vec::new(),
+            popups: Vec::new(),
+        };
     };
 
-    let output_scale = Scale::from(output.current_scale().fractional_scale());
+    let output_scale = output.current_scale().fractional_scale();
+    let output_scale_factor = smithay::utils::Scale::from(output_scale);
     let Some(output_state) = state.output_state_for_output(output) else {
-        return Vec::new();
+        return SplitSpaceElements {
+            windows: Vec::new(),
+            popups: Vec::new(),
+        };
     };
-    let viewport_scale = Scale::from(output_state.viewport().zoom());
-    state
-        .space
-        .render_elements_for_region(renderer, &region, output_scale, 1.0)
-        .into_iter()
-        .map(|element| RescaleRenderElement::from_element(element, (0, 0).into(), viewport_scale))
-        .map(|element| smithay::desktop::space::SpaceRenderElements::Element(Wrap::from(element)))
-        .collect()
+    let viewport_scale = smithay::utils::Scale::from(output_state.viewport().zoom());
+
+    let mut windows = Vec::new();
+    let mut popups = Vec::new();
+
+    for window in state.space.elements().rev() {
+        let Some(space_bbox) = state.space.element_bbox(window) else {
+            continue;
+        };
+        if !region.overlaps(space_bbox) {
+            continue;
+        }
+
+        let Some(element_location) = state.space.element_location(window) else {
+            continue;
+        };
+        let render_location = element_location - window.geometry().loc - region.loc;
+        let physical_location = render_location.to_physical_precise_round(output_scale_factor);
+
+        match window.underlying_surface() {
+            smithay::desktop::WindowSurface::Wayland(toplevel) => {
+                windows.extend(
+                    smithay::backend::renderer::element::surface::render_elements_from_surface_tree::<
+                                _,
+                                smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement<GlesRenderer>,
+                            >(
+                        renderer,
+                        toplevel.wl_surface(),
+                        physical_location,
+                        output_scale_factor,
+                        1.0,
+                        Kind::Unspecified,
+                    )
+                    .into_iter()
+                    .map(|element| {
+                        RescaleRenderElement::from_element(element, (0, 0).into(), viewport_scale)
+                    })
+                    .map(|element| {
+                        smithay::desktop::space::SpaceRenderElements::Element(smithay::backend::renderer::element::Wrap::from(element))
+                    }),
+                );
+
+                popups.extend(
+                    PopupManager::popups_for_surface(toplevel.wl_surface())
+                        .flat_map(|(popup, popup_offset)| {
+                            let popup_render_location =
+                                element_location + popup_offset - popup.geometry().loc - region.loc;
+                            smithay::backend::renderer::element::surface::render_elements_from_surface_tree::<
+                                _,
+                                smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement<GlesRenderer>,
+                            >(
+                                renderer,
+                                popup.wl_surface(),
+                                popup_render_location.to_physical_precise_round(output_scale_factor),
+                                output_scale_factor,
+                                1.0,
+                                Kind::Unspecified,
+                            )
+                        })
+                        .map(|element| {
+                            RescaleRenderElement::from_element(element, (0, 0).into(), viewport_scale)
+                        })
+                        .map(|element| {
+                            smithay::desktop::space::SpaceRenderElements::Element(smithay::backend::renderer::element::Wrap::from(element))
+                        }),
+                );
+            }
+            #[cfg(feature = "xwayland")]
+            smithay::desktop::WindowSurface::X11(surface) => {
+                let elements = smithay::backend::renderer::element::AsRenderElements::<GlesRenderer>::render_elements::<
+                    smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement<
+                        GlesRenderer,
+                    >,
+                >(
+                    surface,
+                    renderer,
+                    physical_location,
+                    output_scale_factor,
+                    1.0,
+                )
+                .into_iter()
+                .map(|element| {
+                    RescaleRenderElement::from_element(element, (0, 0).into(), viewport_scale)
+                })
+                .map(|element| {
+                    smithay::desktop::space::SpaceRenderElements::Element(smithay::backend::renderer::element::Wrap::from(element))
+                });
+
+                if surface.is_override_redirect()
+                    || surface.is_popup()
+                    || surface.is_transient_for().is_some()
+                {
+                    popups.extend(elements);
+                } else {
+                    windows.extend(elements);
+                }
+            }
+        }
+    }
+
+    SplitSpaceElements { windows, popups }
 }
 
 #[cfg(feature = "udev")]

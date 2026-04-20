@@ -83,21 +83,13 @@ fn total_surface_count(tracked_devices: &HashMap<DrmNode, TrackedDrmDevice>) -> 
 }
 
 fn configure_libinput_device(device: &mut smithay::reexports::input::Device) {
-    println!("libinput device added: {}", device.name());
-
     let tap_fingers = device.config_tap_finger_count();
     if tap_fingers == 0 {
         return;
     }
 
     match device.config_tap_set_enabled(true) {
-        Ok(()) => {
-            println!(
-                "enabled tap-to-click for {} ({} finger tap support)",
-                device.name(),
-                tap_fingers
-            );
-        }
+        Ok(()) => {}
         Err(error) => {
             eprintln!(
                 "failed to enable tap-to-click for {}: {error:?}",
@@ -108,9 +100,7 @@ fn configure_libinput_device(device: &mut smithay::reexports::input::Device) {
     }
 
     match device.config_tap_set_button_map(TapButtonMap::LeftRightMiddle) {
-        Ok(()) => {
-            println!("using left-right-middle tap map for {}", device.name());
-        }
+        Ok(()) => {}
         Err(error) => {
             eprintln!(
                 "failed to set tap button map for {}: {error:?}",
@@ -124,7 +114,7 @@ fn render_tracked_surface(
     state: &mut EvilWm,
     renderer: &mut GlesRenderer,
     surface: &mut TrackedSurface,
-    crtc: crtc::Handle,
+    _crtc: crtc::Handle,
 ) -> Result<bool, Box<dyn Error>> {
     state.space.refresh();
     state.cleanup_window_bookkeeping();
@@ -136,19 +126,28 @@ fn render_tracked_surface(
         &surface.output,
         "draw_background",
     ));
+    let mut window_overlay_elements = Some(solid_elements_from_draw_commands(
+        state,
+        &surface.output,
+        "draw_window_overlay",
+    ));
     let mut overlay_elements = Some({
         let mut elements =
             solid_elements_from_draw_commands(state, &surface.output, "draw_overlay");
         elements.extend(super::lock_overlay_elements(state, &surface.output));
         elements
     });
-    let mut space_elements = Some(build_live_space_elements(state, renderer, &surface.output));
+    let space_split = build_live_space_elements(state, renderer, &surface.output);
+    let mut window_elements = Some(space_split.windows);
+    let mut popup_elements = Some(space_split.popups);
 
     let mut elements = Vec::<UdevRenderElements<GlesRenderer, _>>::with_capacity(
         cursor_elements.as_ref().map_or(0, Vec::len)
             + background_elements.as_ref().map_or(0, Vec::len)
-            + overlay_elements.as_ref().map_or(0, Vec::len)
-            + space_elements.as_ref().map_or(0, Vec::len),
+            + window_elements.as_ref().map_or(0, Vec::len)
+            + window_overlay_elements.as_ref().map_or(0, Vec::len)
+            + popup_elements.as_ref().map_or(0, Vec::len)
+            + overlay_elements.as_ref().map_or(0, Vec::len),
     );
     // Lua config stores the stack bottom-to-top, but Smithay consumes render
     // elements front-to-back.
@@ -162,7 +161,21 @@ fn render_tracked_surface(
                     .map(UdevRenderElements::Custom),
             ),
             crate::lua::DrawLayer::Windows => elements.extend(
-                space_elements
+                window_elements
+                    .take()
+                    .into_iter()
+                    .flatten()
+                    .map(UdevRenderElements::Space),
+            ),
+            crate::lua::DrawLayer::WindowOverlay => elements.extend(
+                window_overlay_elements
+                    .take()
+                    .into_iter()
+                    .flatten()
+                    .map(UdevRenderElements::Custom),
+            ),
+            crate::lua::DrawLayer::Popups => elements.extend(
+                popup_elements
                     .take()
                     .into_iter()
                     .flatten()
@@ -190,7 +203,7 @@ fn render_tracked_surface(
         .render_frame::<_, UdevRenderElements<_, _>>(
             renderer,
             &elements,
-            [0.08, 0.05, 0.12, 1.0],
+            state.draw_clear_color(),
             FrameFlags::empty(),
         )?;
     let has_damage = !render_result.is_empty;
@@ -211,7 +224,6 @@ fn render_tracked_surface(
     }
 
     let _ = state.display_handle.flush_clients();
-    println!("rendered tty frame for {:?} damage={has_damage}", crtc);
     Ok(has_damage)
 }
 
@@ -285,7 +297,6 @@ fn reset_tracked_surface_states(tracked_devices: &Rc<RefCell<HashMap<DrmNode, Tr
                 );
             } else {
                 surface.frame_pending = false;
-                println!("reset DRM compositor state on {:?} {:?}", node, crtc);
             }
         }
     }
@@ -348,7 +359,6 @@ fn publish_drm_outputs(
     let notifier_token =
         loop_handle.insert_source(notifier, move |event, _, state| match event {
             DrmEvent::VBlank(crtc) => {
-                println!("drm vblank on {:?} {:?}", node, crtc);
                 let mut tracked_devices = tracked_for_notifier.borrow_mut();
                 let Some(device) = tracked_devices.get_mut(&node) else {
                     return;
@@ -428,11 +438,6 @@ fn publish_drm_outputs(
             Point::new(x as f64, 0.0),
             Size::new(wl_mode.size.w as f64, wl_mode.size.h as f64),
         );
-        if state.space.outputs().count() == 1
-            && let Some(primary) = state.output_state_for_name(&output_name).cloned()
-        {
-            state.output_state = primary;
-        }
         state.notify_output_management_state();
 
         let chosen_crtc = info
@@ -478,10 +483,6 @@ fn publish_drm_outputs(
                         Some(gbm.clone()),
                     ) {
                         Ok(compositor) => {
-                            println!(
-                                "created drm compositor for connector {:?} on {:?}",
-                                connector_handle, crtc
-                            );
                             used_crtcs.push(crtc);
                             surfaces.insert(
                                 crtc,
@@ -605,14 +606,8 @@ pub fn run_udev(options: RuntimeOptions) -> Result<(), Box<dyn Error>> {
     event_loop
         .handle()
         .insert_source(libinput_backend, move |mut event, _, state| {
-            match &mut event {
-                InputEvent::DeviceAdded { device } => {
-                    configure_libinput_device(device);
-                }
-                InputEvent::DeviceRemoved { device } => {
-                    println!("libinput device removed: {}", device.name());
-                }
-                _ => {}
+            if let InputEvent::DeviceAdded { device } = &mut event {
+                configure_libinput_device(device);
             }
 
             state.process_input_event(event);
@@ -626,7 +621,6 @@ pub fn run_udev(options: RuntimeOptions) -> Result<(), Box<dyn Error>> {
         .handle()
         .insert_source(notifier, move |event, &mut (), state| match event {
             SessionEvent::PauseSession => {
-                println!("pausing tty session");
                 state.emit_event("tty_session_paused", serde_json::json!({}));
                 state.tty_session_active = false;
                 libinput_for_session.suspend();
@@ -637,7 +631,6 @@ pub fn run_udev(options: RuntimeOptions) -> Result<(), Box<dyn Error>> {
                 }
             }
             SessionEvent::ActivateSession => {
-                println!("activating tty session");
                 if let Err(error) = libinput_for_session.resume() {
                     state.emit_event(
                         "tty_session_activation_failed",
@@ -682,7 +675,6 @@ pub fn run_udev(options: RuntimeOptions) -> Result<(), Box<dyn Error>> {
         .handle()
         .insert_source(udev_backend, move |event, _, state| match event {
             UdevEvent::Added { device_id, path } => {
-                println!("udev drm device added: {:?} {:?}", device_id, path);
                 if let Ok(node) = DrmNode::from_dev_id(device_id)
                     && let Err(error) = publish_drm_outputs(
                         &loop_handle_for_udev,
@@ -698,7 +690,6 @@ pub fn run_udev(options: RuntimeOptions) -> Result<(), Box<dyn Error>> {
                 }
             }
             UdevEvent::Changed { device_id } => {
-                println!("udev drm device changed: {:?}", device_id);
                 if let Ok(node) = DrmNode::from_dev_id(device_id) {
                     let path = tracked_for_udev
                         .borrow()
@@ -721,7 +712,6 @@ pub fn run_udev(options: RuntimeOptions) -> Result<(), Box<dyn Error>> {
                 }
             }
             UdevEvent::Removed { device_id } => {
-                println!("udev drm device removed: {:?}", device_id);
                 if let Ok(node) = DrmNode::from_dev_id(device_id) {
                     known_paths_for_udev.borrow_mut().remove(&node);
                     remove_published_outputs(&loop_handle_for_udev, state, &tracked_for_udev, node);

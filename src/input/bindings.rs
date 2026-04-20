@@ -175,8 +175,14 @@ mod tests {
 
     #[test]
     fn normalizes_unknown_multi_char_keys_consistently() {
-        assert_eq!(normalize_key("XF86AudioRaiseVolume"), "xf86audioraisevolume");
-        assert_eq!(normalize_key("xf86audioraisevolume"), "xf86audioraisevolume");
+        assert_eq!(
+            normalize_key("XF86AudioRaiseVolume"),
+            "xf86audioraisevolume"
+        );
+        assert_eq!(
+            normalize_key("xf86audioraisevolume"),
+            "xf86audioraisevolume"
+        );
         assert_eq!(normalize_key("  Print  "), "print");
     }
 }

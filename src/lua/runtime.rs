@@ -8,7 +8,7 @@ use std::{
 use mlua::{Lua, Table, Value};
 
 use crate::lua::{
-    config::{Config, ConfigBuilder, ConfigError, resolve_include_path},
+    config::{Config, ConfigBuilder, ConfigError, register_root_include},
     register_draw_api,
 };
 
@@ -25,12 +25,7 @@ impl LuaRuntime {
         let base_dir = base_dir.into();
         let builder = Rc::new(RefCell::new(ConfigBuilder::default()));
 
-        let include_base = base_dir.clone();
-        let include = lua.create_function(move |lua, relative_path: String| {
-            load_lua_value(lua, &include_base, Path::new(&relative_path))
-        })?;
-        lua.globals().set("include", include)?;
-
+        register_root_include(&lua, base_dir.clone())?;
         register_evil_api(&lua, &builder)?;
 
         Ok(Self {
@@ -116,12 +111,4 @@ fn register_evil_api(lua: &Lua, builder: &Rc<RefCell<ConfigBuilder>>) -> Result<
 
     lua.globals().set("evil", evil)?;
     Ok(())
-}
-
-fn load_lua_value(lua: &Lua, base_dir: &Path, relative_path: &Path) -> mlua::Result<Value> {
-    let full_path = resolve_include_path(base_dir, relative_path).map_err(mlua::Error::external)?;
-    let source = fs::read_to_string(&full_path).map_err(mlua::Error::external)?;
-    lua.load(&source)
-        .set_name(full_path.to_string_lossy().as_ref())
-        .eval::<Value>()
 }

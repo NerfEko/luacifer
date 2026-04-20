@@ -1,252 +1,137 @@
 # evilwm
 
-> [!WARNING]
-> `evilwm` is an unfinished research/prototype project. This GitHub mirror exists mainly as a public portfolio snapshot of the idea and direction. If you are not actively developing on it, you should treat it as preview material rather than something ready for installation, everyday use, or polished build/run guidance.
+> [!NOTE]
+> This GitHub repository is a **curated release mirror**.
 >
-> **Active development repo:** https://git.evileko.dev/evileko/evilwm
+> Active development, issue tracking, and long-form documentation live on Forgejo:
+>
+> - **Main repo:** https://git.evileko.dev/evileko/evilwm
+> - **Project wiki:** https://git.evileko.dev/evileko/evilwm/wiki
 
 `evilwm` is an experimental Wayland compositor built around a shared infinite canvas: windows live in world coordinates, and outputs behave like cameras looking into that same world.
 
-It is **not** mainly meant as a polished mass-market desktop. The project is aimed much more directly at **developers who want to completely customize their own desktop UX in a simple scripting language**.
+It is aimed much more at **developers who want to author their own desktop behavior** than at users looking for a polished default environment.
 
-## The idea
-
-Most desktop environments make monitors or workspaces the primary containers that windows live inside. `evilwm` goes in a different direction:
-
-- windows exist in one shared 2D world
-- outputs are viewports into that world
-- navigation can feel more like panning around a map or canvas than switching between isolated workspaces
-- window-manager behavior should be scriptable instead of hardcoded
-
-The long-term goal is a compositor where:
+The core project rule is:
 
 - **Rust provides facts**
 - **Lua provides policy**
 
-In practice, that means Rust should own runtime truth, rendering, protocol handling, validation, and safety, while Lua should be able to shape focus rules, movement behavior, placement, layouts, grouping, and compositor-side visuals.
+---
 
-The point is not just “a compositor with a config file.” The point is a small compositor kernel that can support very different window-management styles without needing a fork for every personality.
+## Main documentation lives in the Forgejo wiki
 
-More specifically, the project is trying to become a good foundation for developers who want to author their own focus rules, placement logic, movement behavior, overlays, automation, and overall desktop interaction model in Lua.
+If you want the real documentation for the project — especially if you want to learn the Lua API, understand the example configs, or craft your own Lua scripts — use the wiki:
 
-## Why it exists
+- **Wiki home:** https://git.evileko.dev/evileko/evilwm/wiki
+- **Writing your first config:** https://git.evileko.dev/evileko/evilwm/wiki/Writing-Your-First-Config
+- **Lua API guide:** https://git.evileko.dev/evileko/evilwm/wiki/Lua-API-Guide
+- **Example configs overview:** https://git.evileko.dev/evileko/evilwm/wiki/Example-Configs-Overview
+- **Tiling example walkthrough:** https://git.evileko.dev/evileko/evilwm/wiki/Example-Tiling
+- **Testing and debugging:** https://git.evileko.dev/evileko/evilwm/wiki/Testing-and-Debugging
 
-`evilwm` is an attempt to explore a desktop model that is:
+If your goal is **writing or editing Lua configs**, start here:
 
-- more spatial than workspace-driven
-- more composable than monolithic window managers
-- more scriptable in policy without giving up a strict runtime core
-- more useful to developers who want to build a personal environment instead of adapting to a fixed UX
+- https://git.evileko.dev/evileko/evilwm/wiki/Writing-Your-First-Config
 
-If it succeeds, the same core could support a freeform floating workflow, a Lua-authored tiler, a spatial canvas desktop, or hybrids that borrow from all three.
+---
 
-## Current status
+## What evilwm is today
 
-Today, the project is best read as:
+Today, `evilwm` is best understood as three things at once:
 
-1. a compositor architecture experiment
-2. a growing policy/runtime testbed
-3. an early prototype for developer-authored desktop UX, not a finished mass-market product
+1. a **pure core library** for canvas, viewport, focus, placement, rules, resize, binding, and output logic
+2. a **deterministic headless runtime** for policy development and regression testing
+3. a **real live compositor** with a practical nested `winit` path and an early standalone `udev` / tty path
 
-Active development is ongoing, and the real source of truth lives on Forgejo.
+## Current state
 
-## Who this is for
+`evilwm` is already useful if your goal is to:
 
-`evilwm` is for people who are comfortable treating their desktop like software they can design.
+- script your own desktop behavior in Lua
+- experiment with focus, movement, resize, and placement policy
+- iterate on custom workflows against a headless runtime and a real nested compositor
+- build on a project that already has real example configs, live smoke coverage, and an actively growing Lua surface
 
-More specifically, it is for developers who want to:
+The main areas still evolving are:
 
-- define their own focus and placement rules
-- customize movement, resize, and keyboard behavior in Lua
-- mix floating, tiling, spatial-canvas, and automation ideas in one setup
-- iterate on UX logic without rewriting the compositor core in Rust
-- build a desktop that fits their own workflow instead of adapting to a fixed WM personality
+- standalone tty confidence and recovery behavior
+- broader desktop / protocol coverage beyond the current proven slices
+- long-term Lua API stabilization and cleanup
 
-## What the Lua layer is for
+For the detailed feature status and limitations, use the wiki:
 
-The Lua side is where `evilwm` is supposed to become expressive.
+- https://git.evileko.dev/evileko/evilwm/wiki/Feature-Status-and-Limitations
 
-Rather than hardcoding all window-manager behavior in Rust, the project exposes runtime facts to Lua and lets Lua decide policy. That includes things like:
+## Feature overview
 
-- keybindings
-- focus behavior
-- movement and resize rules
-- placement logic
-- compositor-drawn overlays and visuals
+| Area | Current picture |
+| --- | --- |
+| Core canvas / window / output logic | strong foundation |
+| Headless runtime | practical and heavily testable |
+| Nested `winit` compositor | the main live path and a good place to actually use and iterate on configs |
+| Lua config + hook surface | real, useful, and expanding |
+| Example configs | multiple serious starting points, including tiling and tty-focused profiles |
+| TTY / standalone backend | usable for controlled testing, still the roughest part of the project |
+| Desktop / protocol coverage | several important slices are real already, with broader coverage still growing |
+| Documentation | wiki-first, with detailed guides for config writing, API use, examples, and debugging |
 
-A typical config today combines setup, hook-based policy, and drawing:
+---
 
-```lua
-evil.config({
-  canvas = {
-    min_zoom = 0.2,
-    max_zoom = 4.0,
-    zoom_step = 1.15,
-    pan_step = 64,
-  },
-})
+## Quick start
 
-evil.bind("Super+Return", "spawn", { command = terminal_cmd })
+This release mirror ships one self-contained public example config:
 
-evil.on.place_window = function(ctx)
-  return { kind = "set_bounds", id = ctx.window.id, x = 200, y = 160, w = 960, h = 720 }
-end
+- `example-config.lua`
 
-evil.on.move_update = function(ctx)
-  return {
-    kind = "move_window",
-    id = ctx.window.id,
-    x = ctx.window.x + ctx.dx,
-    y = ctx.window.y + ctx.dy,
-  }
-end
+### Validate the config
+
+```bash
+cargo run --bin evilwm -- --check-config --config example-config.lua
 ```
 
-The important part is the shape of the system:
+### Run headless
 
-- Rust provides authoritative state and validated primitive actions
-- Lua reads runtime facts through hook context (`ctx`)
-- Lua returns or triggers policy actions like moving, focusing, resizing, placing, spawning, and drawing
-
-This mirror includes one fuller self-contained example config:
-
-- [`example-config.lua`](./example-config.lua)
-
-It is meant to be a readable baseline with practical keybindings, spawn commands, placement, focus behavior, movement, resize handling, and compositor-drawn visuals.
-
-## Why this is the interesting part
-
-The real promise of this project is not just “Lua configuration.” It is that **a Lua config can completely change the kind of window manager this compositor feels like, without requiring a fork of the Rust core.**
-
-That matters most for developers who want to author their own UX rather than merely tweak somebody else's defaults.
-
-That means the same compositor kernel could eventually support very different personalities just by changing policy and helper modules.
-
-<details>
-<summary><strong>Spatial floating canvas setup</strong></summary>
-
-This is the direction the current public example config leans toward: windows cascade into view, movement stays freeform, and the canvas itself is part of the workflow.
-
-```lua
-evil.bind("Super+H", "pan_left", { amount = 48 })
-evil.bind("Super+L", "pan_right", { amount = 48 })
-evil.bind("Super+Equal", "zoom_in", { amount = 1.15 })
-
-evil.on.place_window = function(ctx)
-  return {
-    kind = "set_bounds",
-    id = ctx.window.id,
-    x = ctx.window.x + 48,
-    y = ctx.window.y + 48,
-    w = 960,
-    h = 720,
-  }
-end
-
-evil.on.move_update = function(ctx)
-  return {
-    kind = "move_window",
-    id = ctx.window.id,
-    x = ctx.window.x + ctx.dx,
-    y = ctx.window.y + ctx.dy,
-  }
-end
+```bash
+cargo run --bin evilwm -- --backend headless --config example-config.lua
 ```
-</details>
 
-<details>
-<summary><strong>Classic tiler personality</strong></summary>
+### Run the nested compositor
 
-A different config could use the same compositor as a much more layout-driven WM by making placement deterministic and treating map events like relayout opportunities.
-
-```lua
-local next_column = 0
-
-evil.on.place_window = function(ctx)
-  local x = next_column * 640
-  next_column = (next_column + 1) % 2
-  return {
-    kind = "set_bounds",
-    id = ctx.window.id,
-    x = x,
-    y = 0,
-    w = 640,
-    h = 720,
-  }
-end
-
-evil.on.window_mapped = function(ctx)
-  return { kind = "focus_window", id = ctx.window.id }
-end
+```bash
+cargo run --bin evilwm -- --backend winit --config example-config.lua
 ```
-</details>
 
-<details>
-<summary><strong>Automation-heavy personal desktop</strong></summary>
+### Spawn a client into the nested compositor
 
-Lua can also encode personal workflow rules directly in config logic.
-
-```lua
-evil.on.place_window = function(ctx)
-  if ctx.window.app_id == "foot" then
-    return { kind = "set_bounds", id = ctx.window.id, x = 80, y = 80, w = 900, h = 620 }
-  end
-
-  if ctx.window.title and string.find(string.lower(ctx.window.title), "music", 1, true) then
-    return { kind = "set_bounds", id = ctx.window.id, x = 1200, y = 120, w = 520, h = 520 }
-  end
-end
-
-evil.on.focus_changed = function(ctx)
-  if ctx.focused_window then
-    print("focused:", ctx.focused_window.title or ctx.focused_window.app_id or ctx.focused_window.id)
-  end
-end
+```bash
+cargo run --bin evilwm -- --backend winit --config example-config.lua --command foot
 ```
-</details>
 
-<details>
-<summary><strong>Hybrid setups</strong></summary>
+### Try the current tty path on a spare VT
 
-A hybrid config can mix floating, layout-style placement, and policy exceptions without splitting into separate compositor forks.
-
-```lua
-evil.on.place_window = function(ctx)
-  if ctx.window.app_id == "pavucontrol" then
-    return { kind = "set_bounds", id = ctx.window.id, x = 1200, y = 160, w = 420, h = 520 }
-  end
-
-  return { kind = "set_bounds", id = ctx.window.id, x = 160, y = 120, w = 1000, h = 720 }
-end
-
-evil.on.draw_overlay = function(ctx)
-  if not ctx.focused_window then
-    return nil
-  end
-
-  return evil.draw.stroke_rect({
-    space = "world",
-    x = ctx.focused_window.x,
-    y = ctx.focused_window.y,
-    w = ctx.focused_window.w,
-    h = ctx.focused_window.h,
-    width = 3,
-    color = { 0.74, 0.58, 0.98, 0.98 },
-  })
-end
+```bash
+cargo run --bin evilwm --release --features udev -- --backend udev --config example-config.lua
 ```
-</details>
 
-## Active development
+---
 
-**This GitHub repository is a curated release mirror.**
+## What this mirror is for
 
-For active development, full history, issues, more example configs, tests, detailed documentation, and the real development workflow, use the main development repo:
+This branch exists as a smaller public snapshot of the project.
 
-**https://git.evileko.dev/evileko/evilwm**
+Use it if you want to:
 
-## Development / contributing
+- browse a compact source snapshot
+- build the compositor and try the public example config
+- share or reference the project from GitHub
 
-If you want to follow development or work on the project, start here:
+Use the Forgejo repo and wiki if you want:
 
-**https://git.evileko.dev/evileko/evilwm**
+- the full development history
+- the full set of example configs
+- long-form documentation and status pages
+- current contributor workflow and project planning
+
+- **Main repo:** https://git.evileko.dev/evileko/evilwm
+- **Wiki:** https://git.evileko.dev/evileko/evilwm/wiki

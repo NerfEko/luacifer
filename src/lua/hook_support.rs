@@ -21,9 +21,19 @@ pub enum PropertyValue {
 impl PropertyValue {
     fn to_lua_value(&self, lua: &Lua) -> mlua::Result<Value> {
         match self {
-            PropertyValue::OptionString(Some(s)) => lua.create_string(s.as_str()).map(Value::String),
+            PropertyValue::OptionString(Some(s)) => {
+                lua.create_string(s.as_str()).map(Value::String)
+            }
             PropertyValue::OptionString(None) => Ok(Value::Nil),
             PropertyValue::Bool(b) => Ok(Value::Boolean(*b)),
+        }
+    }
+
+    pub(crate) fn to_json_value(&self) -> serde_json::Value {
+        match self {
+            PropertyValue::OptionString(Some(s)) => serde_json::Value::String(s.clone()),
+            PropertyValue::OptionString(None) => serde_json::Value::Null,
+            PropertyValue::Bool(b) => serde_json::Value::Bool(*b),
         }
     }
 }
@@ -48,11 +58,7 @@ pub fn find_window_snapshot(state: &RuntimeStateSnapshot, id: WindowId) -> Optio
 }
 
 pub fn find_output_snapshot(state: &RuntimeStateSnapshot, id: &str) -> Option<OutputSnapshot> {
-    state
-        .outputs
-        .iter()
-        .find(|output| output.id == id)
-        .cloned()
+    state.outputs.iter().find(|output| output.id == id).cloned()
 }
 
 pub fn find_primary_output_snapshot(state: &RuntimeStateSnapshot) -> Option<OutputSnapshot> {
@@ -117,10 +123,7 @@ pub fn delta_hook_context(
     context.set("dy", delta.y)?;
 
     if let Some(pointer) = pointer {
-        let pointer_table = lua.create_table()?;
-        pointer_table.set("x", pointer.x)?;
-        pointer_table.set("y", pointer.y)?;
-        context.set("pointer", pointer_table)?;
+        context.set("pointer", pointer_to_table(lua, state, pointer)?)?;
     }
 
     if let Some(edges) = edges {
@@ -174,14 +177,13 @@ pub fn focus_resolve_context(lua: &Lua, params: ResolveFocusContext<'_>) -> mlua
     }
 
     if let Some(pointer) = params.pointer {
-        let pointer_table = lua.create_table()?;
-        pointer_table.set("x", pointer.x)?;
-        pointer_table.set("y", pointer.y)?;
-        context.set("pointer", pointer_table)?;
+        context.set("pointer", pointer_to_table(lua, params.state, pointer)?)?;
     }
 
     if let Some(button) = params.button {
         context.set("button", button)?;
+        context.set("button_name", button_name(button))?;
+        context.set("button_info", button_to_table(lua, button)?)?;
     }
     if let Some(pressed) = params.pressed {
         context.set("pressed", pressed)?;
@@ -225,9 +227,13 @@ pub fn key_hook_context(
     context.set("keyspec", keyspec)?;
     context.set("key", key)?;
     context.set("modifiers", modifiers_to_table(lua, modifiers)?)?;
-    if let Some(bound_action) = bound_action {
-        context.set("bound_action", bound_action)?;
-    }
+    context.set("bound_action", bound_action)?;
+    context.set("action", bound_action)?;
+    context.set("has_binding", bound_action.is_some())?;
+    context.set(
+        "pointer",
+        pointer_to_table(lua, state, Point::new(state.pointer.x, state.pointer.y))?,
+    )?;
     Ok(context)
 }
 
@@ -290,6 +296,8 @@ pub fn output_to_table(lua: &Lua, output: &OutputSnapshot) -> mlua::Result<Table
     let viewport = lua.create_table()?;
     viewport.set("x", output.viewport.x)?;
     viewport.set("y", output.viewport.y)?;
+    viewport.set("world_x", output.viewport.x)?;
+    viewport.set("world_y", output.viewport.y)?;
     viewport.set("zoom", output.viewport.zoom)?;
     viewport.set("screen_w", output.viewport.screen_w)?;
     viewport.set("screen_h", output.viewport.screen_h)?;
@@ -315,6 +323,68 @@ pub fn output_to_table(lua: &Lua, output: &OutputSnapshot) -> mlua::Result<Table
     )?;
 
     Ok(output_table)
+}
+
+fn modifier_names(modifiers: ModifierSet) -> Vec<&'static str> {
+    let mut names = Vec::new();
+    if modifiers.ctrl {
+        names.push("Ctrl");
+    }
+    if modifiers.alt {
+        names.push("Alt");
+    }
+    if modifiers.shift {
+        names.push("Shift");
+    }
+    if modifiers.logo {
+        names.push("Super");
+    }
+    names
+}
+
+fn button_name(button: u32) -> Option<&'static str> {
+    match button {
+        272 => Some("left"),
+        273 => Some("right"),
+        274 => Some("middle"),
+        _ => None,
+    }
+}
+
+fn button_to_table(lua: &Lua, button: u32) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    table.set("code", button)?;
+    table.set("name", button_name(button))?;
+    table.set("left", button == 272)?;
+    table.set("right", button == 273)?;
+    table.set("middle", button == 274)?;
+    table.set("known", button_name(button).is_some())?;
+    Ok(table)
+}
+
+fn pointer_to_table(
+    lua: &Lua,
+    state: &RuntimeStateSnapshot,
+    pointer: Point,
+) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    table.set("x", pointer.x)?;
+    table.set("y", pointer.y)?;
+
+    let output = find_output_snapshot_at_point(state, pointer);
+    table.set(
+        "output_id",
+        output.as_ref().map(|output| output.id.as_str()),
+    )?;
+    if let Some(output) = output {
+        table.set("local_x", pointer.x - output.logical_x)?;
+        table.set("local_y", pointer.y - output.logical_y)?;
+    } else {
+        table.set("local_x", Value::Nil)?;
+        table.set("local_y", Value::Nil)?;
+    }
+
+    Ok(table)
 }
 
 pub fn window_to_table(lua: &Lua, window: &WindowSnapshot) -> mlua::Result<Table> {
@@ -348,6 +418,17 @@ pub fn modifiers_to_table(lua: &Lua, modifiers: ModifierSet) -> mlua::Result<Tab
     table.set("alt", modifiers.alt)?;
     table.set("shift", modifiers.shift)?;
     table.set("super", modifiers.logo)?;
+    table.set("logo", modifiers.logo)?;
+
+    let names = modifier_names(modifiers);
+    let names_table = lua.create_table()?;
+    for (index, name) in names.iter().enumerate() {
+        names_table.set(index + 1, *name)?;
+    }
+    table.set("names", names_table)?;
+    table.set("count", names.len())?;
+    table.set("any", !names.is_empty())?;
+    table.set("none", names.is_empty())?;
     Ok(table)
 }
 
@@ -388,4 +469,212 @@ pub fn property_changed_hook_context(
     context.set("old_value", old_value.to_lua_value(lua)?)?;
     context.set("new_value", new_value.to_lua_value(lua)?)?;
     Ok(context)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lua::{OutputSnapshot, PointerSnapshot, ViewportSnapshot};
+
+    fn sample_state() -> RuntimeStateSnapshot {
+        RuntimeStateSnapshot {
+            focused_window_id: Some(7),
+            pointer: PointerSnapshot { x: 320.0, y: 180.0 },
+            outputs: vec![OutputSnapshot {
+                id: "nested".into(),
+                logical_x: 0.0,
+                logical_y: 0.0,
+                viewport: ViewportSnapshot {
+                    x: 0.0,
+                    y: 0.0,
+                    zoom: 1.25,
+                    screen_w: 1280.0,
+                    screen_h: 720.0,
+                    visible_world: Rect::new(0.0, 0.0, 1024.0, 576.0),
+                },
+            }],
+            windows: vec![WindowSnapshot {
+                id: 7,
+                app_id: Some("foot".into()),
+                title: Some("shell".into()),
+                bounds: Rect::new(100.0, 200.0, 640.0, 480.0),
+                floating: false,
+                exclude_from_focus: false,
+                focused: true,
+                fullscreen: false,
+                maximized: false,
+                urgent: false,
+                mapped: true,
+                mapped_at: Some(123.0),
+                last_focused_at: Some(456.0),
+                output_id: Some("nested".into()),
+                pid: Some(999),
+            }],
+        }
+    }
+
+    #[test]
+    fn focus_hook_context_exposes_aliases_and_state() {
+        let lua = Lua::new();
+        let state = sample_state();
+        let window = &state.windows[0];
+        let ctx = focus_hook_context(&lua, &state, None, Some(window)).expect("focus context");
+
+        assert_eq!(
+            ctx.get::<Option<u64>>("previous_window_id")
+                .expect("previous"),
+            None
+        );
+        assert_eq!(
+            ctx.get::<Option<u64>>("focused_window_id")
+                .expect("focused"),
+            Some(7)
+        );
+        assert!(ctx.get::<Table>("state").is_ok(), "state table must exist");
+        assert!(
+            ctx.get::<Table>("focused_window").is_ok(),
+            "focused_window alias must exist"
+        );
+    }
+
+    #[test]
+    fn property_changed_context_exposes_window_id_and_values() {
+        let lua = Lua::new();
+        let state = sample_state();
+        let window = &state.windows[0];
+        let ctx = property_changed_hook_context(
+            &lua,
+            &state,
+            window,
+            "title",
+            &PropertyValue::OptionString(None),
+            &PropertyValue::OptionString(Some("shell".into())),
+        )
+        .expect("property context");
+
+        assert_eq!(ctx.get::<u64>("window_id").expect("window_id"), 7);
+        assert_eq!(ctx.get::<String>("property").expect("property"), "title");
+        assert!(
+            ctx.get::<Table>("window").is_ok(),
+            "window alias must exist"
+        );
+        assert!(ctx.get::<Table>("state").is_ok(), "state alias must exist");
+        assert!(ctx.get::<Value>("old_value").expect("old").is_nil());
+        let Value::String(new_value) = ctx.get::<Value>("new_value").expect("new") else {
+            panic!("expected string new value")
+        };
+        assert_eq!(new_value.to_str().expect("utf8 new value"), "shell");
+    }
+
+    #[test]
+    fn key_hook_context_exposes_binding_pointer_and_modifier_metadata() {
+        let lua = Lua::new();
+        let state = sample_state();
+        let ctx = key_hook_context(
+            &lua,
+            &state,
+            "Ctrl+Shift+K",
+            "K",
+            ModifierSet {
+                ctrl: true,
+                alt: false,
+                shift: true,
+                logo: true,
+            },
+            Some("pan_left"),
+        )
+        .expect("key context");
+
+        assert_eq!(
+            ctx.get::<String>("keyspec").expect("keyspec"),
+            "Ctrl+Shift+K"
+        );
+        assert_eq!(ctx.get::<String>("key").expect("key"), "K");
+        assert_eq!(
+            ctx.get::<String>("bound_action").expect("bound_action"),
+            "pan_left"
+        );
+        assert_eq!(ctx.get::<String>("action").expect("action"), "pan_left");
+        assert!(ctx.get::<bool>("has_binding").expect("has_binding"));
+
+        let pointer = ctx.get::<Table>("pointer").expect("pointer");
+        assert_eq!(
+            pointer.get::<String>("output_id").expect("output_id"),
+            "nested"
+        );
+        assert_eq!(pointer.get::<f64>("local_x").expect("local_x"), 320.0);
+        assert_eq!(pointer.get::<f64>("local_y").expect("local_y"), 180.0);
+
+        let modifiers = ctx.get::<Table>("modifiers").expect("modifiers");
+        assert!(modifiers.get::<bool>("ctrl").expect("ctrl"));
+        assert!(modifiers.get::<bool>("shift").expect("shift"));
+        assert!(modifiers.get::<bool>("super").expect("super"));
+        assert!(modifiers.get::<bool>("logo").expect("logo"));
+        assert!(modifiers.get::<bool>("any").expect("any"));
+        assert!(!modifiers.get::<bool>("none").expect("none"));
+        assert_eq!(modifiers.get::<usize>("count").expect("count"), 3);
+        let names = modifiers.get::<Table>("names").expect("names");
+        assert_eq!(names.get::<String>(1).expect("name 1"), "Ctrl");
+        assert_eq!(names.get::<String>(2).expect("name 2"), "Shift");
+        assert_eq!(names.get::<String>(3).expect("name 3"), "Super");
+    }
+
+    #[test]
+    fn resolve_focus_context_exposes_window_previous_and_modifiers() {
+        let lua = Lua::new();
+        let state = sample_state();
+        let window = &state.windows[0];
+        let ctx = focus_resolve_context(
+            &lua,
+            ResolveFocusContext {
+                reason: "pointer_button",
+                state: &state,
+                window: Some(window),
+                previous: Some(window),
+                pointer: Some(Point::new(12.0, 34.0)),
+                button: Some(272),
+                pressed: Some(true),
+                modifiers: Some(ModifierSet {
+                    ctrl: true,
+                    alt: false,
+                    shift: true,
+                    logo: false,
+                }),
+            },
+        )
+        .expect("resolve context");
+
+        assert_eq!(
+            ctx.get::<String>("reason").expect("reason"),
+            "pointer_button"
+        );
+        assert_eq!(ctx.get::<u64>("window_id").expect("window id"), 7);
+        assert_eq!(
+            ctx.get::<u64>("previous_window_id").expect("previous id"),
+            7
+        );
+        assert_eq!(ctx.get::<u32>("button").expect("button"), 272);
+        assert_eq!(
+            ctx.get::<String>("button_name").expect("button_name"),
+            "left"
+        );
+        let button_info = ctx.get::<Table>("button_info").expect("button_info");
+        assert_eq!(button_info.get::<u32>("code").expect("code"), 272);
+        assert!(button_info.get::<bool>("left").expect("left"));
+        assert!(button_info.get::<bool>("known").expect("known"));
+        assert!(ctx.get::<bool>("pressed").expect("pressed"));
+        let pointer = ctx.get::<Table>("pointer").expect("pointer");
+        assert_eq!(pointer.get::<f64>("x").expect("pointer x"), 12.0);
+        assert_eq!(
+            pointer.get::<String>("output_id").expect("output_id"),
+            "nested"
+        );
+        assert_eq!(pointer.get::<f64>("local_x").expect("local_x"), 12.0);
+        assert_eq!(pointer.get::<f64>("local_y").expect("local_y"), 34.0);
+        let modifiers = ctx.get::<Table>("modifiers").expect("modifiers");
+        assert!(modifiers.get::<bool>("ctrl").expect("ctrl"));
+        assert!(modifiers.get::<bool>("shift").expect("shift"));
+        assert!(modifiers.get::<bool>("any").expect("any"));
+        assert_eq!(modifiers.get::<usize>("count").expect("count"), 2);
+    }
 }

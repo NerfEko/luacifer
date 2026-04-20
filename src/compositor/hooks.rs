@@ -83,8 +83,8 @@ impl EvilWm {
             serde_json::json!({
                 "id": id.0,
                 "property": property,
-                "old": format!("{:?}", old_value),
-                "new": format!("{:?}", new_value),
+                "old_value": old_value.to_json_value(),
+                "new_value": new_value.to_json_value(),
             }),
         );
         #[cfg(feature = "lua")]
@@ -246,7 +246,12 @@ impl EvilWm {
         });
     }
 
-    pub(crate) fn trigger_live_move_end(&mut self, id: WindowId, delta: crate::canvas::Vec2, pointer: Point) {
+    pub(crate) fn trigger_live_move_end(
+        &mut self,
+        id: WindowId,
+        delta: crate::canvas::Vec2,
+        pointer: Point,
+    ) {
         self.emit_event(
             "interactive_move_end",
             serde_json::json!({
@@ -343,4 +348,59 @@ impl EvilWm {
 #[cfg(feature = "lua")]
 pub(super) fn format_live_hook_error(hook_name: &str, error: &crate::lua::ConfigError) -> String {
     format!("[evilwm] lua hook error: evil.on.{hook_name} — {error}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lua::PropertyValue;
+    use smithay::reexports::{calloop::EventLoop, wayland_server::Display};
+
+    #[test]
+    fn property_change_event_log_uses_structured_json_values() {
+        let log_dir = tempfile::tempdir().expect("tempdir");
+        let log_path = log_dir.path().join("events.jsonl");
+        let mut event_loop: EventLoop<EvilWm> = EventLoop::try_new().expect("event loop");
+        let display: Display<EvilWm> = Display::new().expect("display");
+        let mut state = EvilWm::new(&mut event_loop, display, None, None).expect("state");
+        state.event_log_path = Some(log_path.clone());
+
+        state.trigger_live_window_property_changed(
+            WindowId(7),
+            "title",
+            PropertyValue::OptionString(None),
+            PropertyValue::OptionString(Some("shell".into())),
+        );
+        state.trigger_live_window_property_changed(
+            WindowId(7),
+            "floating",
+            PropertyValue::Bool(false),
+            PropertyValue::Bool(true),
+        );
+
+        let entries = std::fs::read_to_string(&log_path)
+            .expect("read event log")
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .collect::<Vec<_>>();
+        let title = entries
+            .iter()
+            .find(|entry| {
+                entry["kind"] == "window_property_changed" && entry["data"]["property"] == "title"
+            })
+            .expect("title property event");
+        assert!(title["data"]["old_value"].is_null());
+        assert_eq!(title["data"]["new_value"], serde_json::json!("shell"));
+
+        let floating = entries
+            .iter()
+            .find(|entry| {
+                entry["kind"] == "window_property_changed"
+                    && entry["data"]["property"] == "floating"
+            })
+            .expect("floating property event");
+        assert_eq!(floating["data"]["old_value"], serde_json::json!(false));
+        assert_eq!(floating["data"]["new_value"], serde_json::json!(true));
+    }
 }
