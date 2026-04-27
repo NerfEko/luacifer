@@ -1,137 +1,90 @@
-# evilwm
+# Luacifer
 
 > [!NOTE]
 > This GitHub repository is a **curated release mirror**.
 >
-> Active development, issue tracking, and long-form documentation live on Forgejo:
+> Active development, issue tracking, and full documentation live on Forgejo:
 >
-> - **Main repo:** https://git.evileko.dev/evileko/evilwm
-> - **Project wiki:** https://git.evileko.dev/evileko/evilwm/wiki
-
-`evilwm` is an experimental Wayland compositor built around a shared infinite canvas: windows live in world coordinates, and outputs behave like cameras looking into that same world.
-
-It is aimed much more at **developers who want to author their own desktop behavior** than at users looking for a polished default environment.
-
-The core project rule is:
-
-- **Rust provides facts**
-- **Lua provides policy**
+> - **Main repo:** https://git.evileko.dev/evileko/luacifer
+> - **Project wiki:** https://git.evileko.dev/evileko/luacifer/wiki
 
 ---
 
-## Main documentation lives in the Forgejo wiki
+> _A compositor so nice, you configure it with your evil twin._
 
-If you want the real documentation for the project — especially if you want to learn the Lua API, understand the example configs, or craft your own Lua scripts — use the wiki:
+**Luacifer** is a Wayland compositor built on an infinite canvas. Every window lives in world coordinates. Every output is a camera. You write the rules in Lua — and the engine executes them.
 
-- **Wiki home:** https://git.evileko.dev/evileko/evilwm/wiki
-- **Writing your first config:** https://git.evileko.dev/evileko/evilwm/wiki/Writing-Your-First-Config
-- **Lua API guide:** https://git.evileko.dev/evileko/evilwm/wiki/Lua-API-Guide
-- **Example configs overview:** https://git.evileko.dev/evileko/evilwm/wiki/Example-Configs-Overview
-- **Tiling example walkthrough:** https://git.evileko.dev/evileko/evilwm/wiki/Example-Tiling
-- **Testing and debugging:** https://git.evileko.dev/evileko/evilwm/wiki/Testing-and-Debugging
+The guiding philosophy is simple:
 
-If your goal is **writing or editing Lua configs**, start here:
+> **Rust provides facts. Lua provides policy.**
 
-- https://git.evileko.dev/evileko/evilwm/wiki/Writing-Your-First-Config
+Luacifer handles the hard stuff: Wayland protocols, rendering, input devices, DRM. You write a Lua script that says _where_ windows go, _how_ they move, and _what_ happens when you press a key. No recompiling. No patching C. That's the E.V.I.L. engine at work.
 
----
+**Luacifer** = **Lua** + **Lucifer** (the light-bringer). It lights up your displays. It also brings a little chaos, in the best way.
 
-## What evilwm is today
-
-Today, `evilwm` is best understood as three things at once:
-
-1. a **pure core library** for canvas, viewport, focus, placement, rules, resize, binding, and output logic
-2. a **deterministic headless runtime** for policy development and regression testing
-3. a **real live compositor** with a practical nested `winit` path and an early standalone `udev` / tty path
-
-## Current state
-
-`evilwm` is already useful if your goal is to:
-
-- script your own desktop behavior in Lua
-- experiment with focus, movement, resize, and placement policy
-- iterate on custom workflows against a headless runtime and a real nested compositor
-- build on a project that already has real example configs, live smoke coverage, and an actively growing Lua surface
-
-The main areas still evolving are:
-
-- standalone tty confidence and recovery behavior
-- broader desktop / protocol coverage beyond the current proven slices
-- long-term Lua API stabilization and cleanup
-
-For the detailed feature status and limitations, use the wiki:
-
-- https://git.evileko.dev/evileko/evilwm/wiki/Feature-Status-and-Limitations
-
-## Feature overview
-
-| Area | Current picture |
-| --- | --- |
-| Core canvas / window / output logic | strong foundation |
-| Headless runtime | practical and heavily testable |
-| Nested `winit` compositor | the main live path and a good place to actually use and iterate on configs |
-| Lua config + hook surface | real, useful, and expanding |
-| Example configs | multiple serious starting points, including tiling and tty-focused profiles |
-| TTY / standalone backend | usable for controlled testing, still the roughest part of the project |
-| Desktop / protocol coverage | several important slices are real already, with broader coverage still growing |
-| Documentation | wiki-first, with detailed guides for config writing, API use, examples, and debugging |
+**E.V.I.L.** — Event & Viewport Integration Layer.
 
 ---
 
 ## Quick start
 
-This release mirror ships one self-contained public example config:
+This mirror ships one self-contained public example config:
 
 - `example-config.lua`
 
-### Validate the config
-
 ```bash
-cargo run --bin evilwm -- --check-config --config example-config.lua
+# Build it
+cargo build
+
+# Validate the config
+cargo run --bin luacifer -- --check-config --config example-config.lua
+
+# Run in a window (nested compositor — great for hacking)
+cargo run --bin luacifer -- --backend winit --config example-config.lua
+
+# Spawn a terminal inside
+cargo run --bin luacifer -- --backend winit --config example-config.lua --command foot
+
+# Run headless (no display needed)
+cargo run --bin luacifer -- --backend headless --config example-config.lua
+
+# Brave? Try on a spare VT
+cargo run --bin luacifer --release --features udev -- --backend udev --config example-config.lua
 ```
 
-### Run headless
+---
 
-```bash
-cargo run --bin evilwm -- --backend headless --config example-config.lua
-```
+## What you can do today
 
-### Run the nested compositor
+Luacifer is functional and fun _right now_:
 
-```bash
-cargo run --bin evilwm -- --backend winit --config example-config.lua
-```
+- **Script your desktop in Lua.** Focus, placement, keybindings, resize — all configurable without touching Rust.
+- **Iterate fast.** The nested winit backend runs in a window. Edit your config, restart, repeat.
+- **Test deterministically.** The headless runtime lets you write regression tests for window management policy.
+- **Go bare metal.** The udev/DRM backend runs on a real TTY (experimental, but already real).
 
-### Spawn a client into the nested compositor
+---
 
-```bash
-cargo run --bin evilwm -- --backend winit --config example-config.lua --command foot
-```
+## Documentation
 
-### Try the current tty path on a spare VT
+All the real docs live on the Forgejo wiki:
 
-```bash
-cargo run --bin evilwm --release --features udev -- --backend udev --config example-config.lua
-```
+| Page                                                                                                 | What's in it                    |
+| ---------------------------------------------------------------------------------------------------- | ------------------------------- |
+| [Writing Your First Config](https://git.evileko.dev/evileko/luacifer/wiki/Writing-Your-First-Config) | Start here if you're new        |
+| [Lua API Guide](https://git.evileko.dev/evileko/luacifer/wiki/Lua-API-Guide)                         | Complete `evil.*` API reference |
+| [Hooks Guide](https://git.evileko.dev/evileko/luacifer/wiki/Hooks-Guide)                             | Event hooks explained           |
+| [Example Configs Overview](https://git.evileko.dev/evileko/luacifer/wiki/Example-Configs-Overview)   | Walkthroughs of every example   |
+| [Feature Status](https://git.evileko.dev/evileko/luacifer/wiki/Feature-Status-and-Limitations)       | What works, what's coming       |
+| [Testing & Debugging](https://git.evileko.dev/evileko/luacifer/wiki/Testing-and-Debugging)           | How to test and debug           |
 
 ---
 
 ## What this mirror is for
 
-This branch exists as a smaller public snapshot of the project.
+This branch is a smaller public snapshot for GitHub. Use it if you want to browse a compact source tree, build the compositor, or try the public example config.
 
-Use it if you want to:
+For the full development history, all example configs, long-form docs, and the contributor workflow:
 
-- browse a compact source snapshot
-- build the compositor and try the public example config
-- share or reference the project from GitHub
-
-Use the Forgejo repo and wiki if you want:
-
-- the full development history
-- the full set of example configs
-- long-form documentation and status pages
-- current contributor workflow and project planning
-
-- **Main repo:** https://git.evileko.dev/evileko/evilwm
-- **Wiki:** https://git.evileko.dev/evileko/evilwm/wiki
+- **Main repo:** https://git.evileko.dev/evileko/luacifer
+- **Wiki:** https://git.evileko.dev/evileko/luacifer/wiki
