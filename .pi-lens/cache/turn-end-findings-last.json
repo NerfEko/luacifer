@@ -1,3 +1,0 @@
-{
-  "signature": "scripts/tty-virt-smoke.sh::📐 Cascade errors in 1 other file(s) — fix before finishing turn:\n<diagnostics file=\"Cargo.toml\">\n  line 62, col 1: {\"rust\":{\"unexpected_cfgs\":{\"level\":\"warn\",\"check-cfg\":[\"cfg(nested_backend)\",\"cfg(live_backend)\"]}}\n</diagnostics>"
-}
