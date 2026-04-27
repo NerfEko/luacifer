@@ -22,7 +22,17 @@ Luacifer handles the hard stuff: Wayland protocols, rendering, input devices, DR
 
 **Luacifer** = **Lua** + **Lucifer** (the light-bringer). It lights up your displays. It also brings a little chaos, in the best way.
 
-**E.V.I.L.** — Event & Viewport Integration Layer.
+### The E.V.I.L. engine
+
+Under the hood, Luacifer runs on the **E.V.I.L.** engine — the pure core that owns the canvas, viewport, window model, focus, placement, and input binding. Every config script taps into it through the `evil.*` Lua namespace:
+
+- `evil.config()` — set up your compositor in one table
+- `evil.window` — query, move, resize, and focus windows
+- `evil.canvas` — pan and zoom the infinite world-space viewport
+- `evil.bind()` — wire keys to Lua actions
+- `evil.on.*` hooks — intercept focus, placement, and lifecycle events
+
+The engine is also what makes the headless runtime possible: you can write and test window management policy without a display, then run the same config on real hardware.
 
 ---
 
