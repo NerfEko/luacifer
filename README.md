@@ -150,7 +150,3 @@ For the full development history, issue tracking, and contributor workflow:
 - **Wiki:** https://git.evileko.dev/evileko/luacifer/wiki
 
 ---
-
-## License
-
-MIT © EKo
